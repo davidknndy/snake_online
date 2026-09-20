@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "828667327367",
+    "project_id": "snake-online-8a1ab",
+    "storage_bucket": "snake-online-8a1ab.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:828667327367:android:50a61895e4ae7093671922",
+        "android_client_info": {
+          "package_name": "com.dkstudio.snakeonline"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "828667327367-48g0ko0q5emr95mf9sr11fk0fdip9ho4.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.dkstudio.snakeonline",
+            "certificate_hash": "f804f622ae7eb10fe04ec00c04432dab73e747a2"
+          }
+        },
+        {
+          "client_id": "828667327367-e7kc0sghlhoh8ehc6a86kbua39sjnlgk.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDPvDHdrF1T5YmElRKCabdcti1oR9o1gMM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "828667327367-e7kc0sghlhoh8ehc6a86kbua39sjnlgk.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

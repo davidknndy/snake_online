@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>828667327367-4jsvaisn1c3k768c9vq6m6b1brg0phh9.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.828667327367-4jsvaisn1c3k768c9vq6m6b1brg0phh9</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>828667327367-48g0ko0q5emr95mf9sr11fk0fdip9ho4.apps.googleusercontent.com</string>
+	<key>API_KEY</key>
+	<string>AIzaSyADRDteP4SIyJ_13s455IOmSv-d0aaDIro</string>
+	<key>GCM_SENDER_ID</key>
+	<string>828667327367</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.dkstudio.snakeOnline</string>
+	<key>PROJECT_ID</key>
+	<string>snake-online-8a1ab</string>
+	<key>STORAGE_BUCKET</key>
+	<string>snake-online-8a1ab.firebasestorage.app</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:828667327367:ios:e0c12ed8fbf87c27671922</string>
+</dict>
+</plist>
