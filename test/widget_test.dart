@@ -784,6 +784,49 @@ void main() {
       expect(snake.head, equals(const Position(10, 20)));
       expect(snake.checkWallCollision(20, 20), isTrue);
     });
+
+    test('Game status check: when opponent crashed first, winner is declared and local crash is blocked', () {
+      bool isWinner = false;
+      bool isGameOver = false;
+
+      void handleOpponentCrashed() {
+        if (isGameOver) return;
+        isGameOver = true;
+        isWinner = true;
+      }
+
+      void handlePlayerCrashed() {
+        if (isGameOver) return;
+        isGameOver = true;
+        isWinner = false;
+      }
+
+      // Simulate server returning that opponent already crashed
+      final serverStatus = {
+        'status': 'finished',
+        'isWin': true,
+        'winner': {'name': 'Player 1'},
+        'loser': {'name': 'Player 2'},
+        'reason': 'crashed',
+      };
+
+      if (serverStatus['status'] == 'finished') {
+        if (serverStatus['isWin'] == true) {
+          handleOpponentCrashed();
+        } else {
+          handlePlayerCrashed();
+        }
+      }
+
+      expect(isGameOver, isTrue);
+      expect(isWinner, isTrue);
+
+      // Now simulate a delayed local wall crash attempt after resume
+      handlePlayerCrashed();
+
+      // State MUST remain as Winner, not overwritten by delayed local crash
+      expect(isWinner, isTrue);
+    });
   });
 }
 

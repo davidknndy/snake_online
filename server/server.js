@@ -13,6 +13,8 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST'],
   },
+  pingTimeout: 5000,
+  pingInterval: 5000,
 });
 
 const PORT = process.env.PORT || 3000;
@@ -107,6 +109,100 @@ const queues = {
 
 // Active games
 const activeGames = new Map();
+
+// Finished games cache (kept for 2 minutes to reliably report match results to reconnected/resumed players)
+const finishedGames = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [gameId, rec] of finishedGames.entries()) {
+    if (now - rec.endedAt > 120000) { // 2 minutes
+      finishedGames.delete(gameId);
+    }
+  }
+}, 30000);
+
+function finishGame(targetGameId, winnerUser, loserUser, reason, crashedSocket) {
+  if (!targetGameId) return;
+  const game = activeGames.get(targetGameId);
+  if (game) {
+    if (game.disconnectTimer) clearTimeout(game.disconnectTimer);
+    if (game.minimizeTimer) clearTimeout(game.minimizeTimer);
+    activeGames.delete(targetGameId);
+  }
+
+  const finishedRecord = {
+    gameId: targetGameId,
+    winnerUser: winnerUser ? { ...winnerUser } : null,
+    loserUser: loserUser ? { ...loserUser } : null,
+    reason: reason || 'crashed',
+    endedAt: Date.now(),
+  };
+  finishedGames.set(targetGameId, finishedRecord);
+
+  const crashedName = loserUser?.name || 'Oponente';
+  console.log(`[Game Over] Partida encerrada: ${targetGameId}. Vencedor: ${winnerUser?.name}, Perdedor: ${crashedName} (motivo: ${reason})`);
+
+  // 1. Broadcast to the room: socket.to(room) reaches the opponent
+  if (crashedSocket) {
+    crashedSocket.to(targetGameId).emit('opponent_crashed', {
+      crashedPlayer: crashedName,
+      winner: winnerUser?.name,
+      isWin: true,
+      reason: reason,
+    });
+    crashedSocket.to(targetGameId).emit('match_finished', {
+      gameId: targetGameId,
+      isWin: true,
+      winner: winnerUser,
+      loser: loserUser,
+      reason: reason,
+    });
+    crashedSocket.emit('match_finished', {
+      gameId: targetGameId,
+      isWin: false,
+      winner: winnerUser,
+      loser: loserUser,
+      reason: reason,
+    });
+  }
+
+  // 2. Direct socket delivery to all known players
+  if (game && Array.isArray(game.playerData)) {
+    for (const p of game.playerData) {
+      if (!p.socketId) continue;
+      if (crashedSocket && p.socketId === crashedSocket.id) continue;
+
+      const isWinner = winnerUser && p.user && 
+        (p.user === winnerUser ||
+         (winnerUser.id && p.user.id === winnerUser.id) ||
+         (winnerUser.name && p.user.name === winnerUser.name));
+
+      if (isWinner) {
+        io.to(p.socketId).emit('opponent_crashed', {
+          crashedPlayer: crashedName,
+          winner: winnerUser?.name,
+          isWin: true,
+          reason: reason,
+        });
+        io.to(p.socketId).emit('match_finished', {
+          gameId: targetGameId,
+          isWin: true,
+          winner: winnerUser,
+          loser: loserUser,
+          reason: reason,
+        });
+      }
+    }
+  }
+
+  // 3. Fallback: room broadcast with crashedPlayer tag
+  io.to(targetGameId).emit('opponent_crashed', {
+    crashedPlayer: crashedName,
+    winner: winnerUser?.name,
+    reason: reason,
+  });
+}
 
 // Helper to find an active match for a user (within 5 minutes)
 function findActiveGameForUser(user) {
@@ -471,14 +567,44 @@ io.on('connection', (socket) => {
   // Reconnect active game if app was minimized/backgrounded
   socket.on('reconnect_game', (data) => {
     if (!data || !data.gameId) return;
-    const game = activeGames.get(data.gameId);
+    const gameId = data.gameId;
+
+    // Check if game already finished while user was away
+    const finished = finishedGames.get(gameId);
+    if (finished) {
+      const isWinner = (finished.winnerUser?.id && socket.user?.id && finished.winnerUser.id === socket.user.id) ||
+                       (finished.winnerUser?.name && socket.user?.name && 
+                        (finished.winnerUser.name === socket.user.name || finished.winnerUser.name.startsWith(`${socket.user.name} #`)));
+      if (isWinner) {
+        socket.emit('opponent_crashed', {
+          crashedPlayer: finished.loserUser?.name || 'Oponente',
+          winner: finished.winnerUser?.name,
+          reason: finished.reason,
+        });
+      }
+      socket.emit('match_finished', {
+        gameId,
+        winner: finished.winnerUser,
+        loser: finished.loserUser,
+        isWin: isWinner,
+        reason: finished.reason,
+      });
+      console.log(`[Partida] Jogador ${socket.user.name} reconectou a partida já encerrada: ${gameId} (isWinner=${isWinner})`);
+      return;
+    }
+
+    const game = activeGames.get(gameId);
     if (game) {
       if (game.disconnectTimer) {
         clearTimeout(game.disconnectTimer);
         game.disconnectTimer = null;
       }
-      socket.join(data.gameId);
-      socket.gameId = data.gameId;
+      if (game.minimizeTimer) {
+        clearTimeout(game.minimizeTimer);
+        game.minimizeTimer = null;
+      }
+      socket.join(gameId);
+      socket.gameId = gameId;
       if (!game.players.includes(socket.id)) {
         game.players.push(socket.id);
       }
@@ -489,11 +615,114 @@ io.on('connection', (socket) => {
         );
         if (myP) myP.socketId = socket.id;
       }
-      socket.to(data.gameId).emit('opponent_connection_state', {
+      socket.to(gameId).emit('opponent_connection_state', {
         state: 'reconnected',
         playerId: socket.id,
       });
-      console.log(`[Partida] Jogador ${socket.user.name} reconectou à sala ${data.gameId}`);
+      console.log(`[Partida] Jogador ${socket.user.name} reconectou à sala ${gameId}`);
+    }
+  });
+
+  // Query game status (e.g. after app resume to verify if game already ended)
+  socket.on('get_game_status', (data, ack) => {
+    const gameId = (data && data.gameId) || socket.gameId;
+    const reqUser = (data && data.user) || socket.user;
+    if (!gameId) {
+      if (typeof ack === 'function') ack({ status: 'unknown' });
+      return;
+    }
+
+    const finished = finishedGames.get(gameId);
+    if (finished) {
+      const isWinner = (finished.winnerUser?.id && reqUser?.id && finished.winnerUser.id === reqUser.id) ||
+                       (finished.winnerUser?.name && reqUser?.name && 
+                        (finished.winnerUser.name === reqUser.name || finished.winnerUser.name.startsWith(`${reqUser.name} #`)));
+      if (typeof ack === 'function') {
+        ack({
+          status: 'finished',
+          isWin: isWinner,
+          winner: finished.winnerUser,
+          loser: finished.loserUser,
+          reason: finished.reason,
+        });
+      }
+      return;
+    }
+
+    const active = activeGames.get(gameId);
+    if (active) {
+      if (typeof ack === 'function') {
+        ack({ status: 'active' });
+      }
+      return;
+    }
+
+    if (typeof ack === 'function') {
+      ack({ status: 'unknown' });
+    }
+  });
+
+  // Player minimized app (e.g. switched dual app or backgrounded)
+  socket.on('player_minimized', (data) => {
+    let targetGameId = (data && data.gameId) || socket.gameId;
+    if (!targetGameId) {
+      const active = findActiveGameForUser(socket.user);
+      if (active) targetGameId = active.game.gameId;
+    }
+    if (!targetGameId) return;
+
+    const game = activeGames.get(targetGameId);
+    if (!game) return;
+
+    console.log(`[Partida] Jogador ${socket.user.name} minimizou o app na sala ${targetGameId}`);
+    socket.to(targetGameId).emit('opponent_connection_state', {
+      state: 'minimized',
+      playerId: socket.id,
+    });
+
+    // Start 3.5s minimize timer: if player does not return, their snake crashes into the wall
+    if (!game.minimizeTimer) {
+      game.minimizeTimer = setTimeout(() => {
+        if (activeGames.has(targetGameId)) {
+          console.log(`[Partida] Tempo minimizado expirado (3.5s) para ${socket.user.name} na sala ${targetGameId}. Registrando batida!`);
+          let minimizedUser = socket.user;
+          let opponentUser = null;
+          if (Array.isArray(game.playerData)) {
+            const mEntry = game.playerData.find(p => 
+              (socket.user?.id && p.user?.id === socket.user.id) ||
+              (socket.user?.name && p.user?.name === socket.user.name) ||
+              p.socketId === socket.id
+            );
+            if (mEntry) minimizedUser = mEntry.user;
+            const opEntry = game.playerData.find(p => p !== mEntry);
+            if (opEntry) opponentUser = opEntry.user;
+          }
+          finishGame(targetGameId, opponentUser, minimizedUser, 'minimized_timeout');
+        }
+      }, 3500);
+    }
+  });
+
+  // Player resumed app
+  socket.on('player_resumed', (data) => {
+    let targetGameId = (data && data.gameId) || socket.gameId;
+    if (!targetGameId) {
+      const active = findActiveGameForUser(socket.user);
+      if (active) targetGameId = active.game.gameId;
+    }
+    if (!targetGameId) return;
+
+    const game = activeGames.get(targetGameId);
+    if (game) {
+      if (game.minimizeTimer) {
+        clearTimeout(game.minimizeTimer);
+        game.minimizeTimer = null;
+      }
+      socket.to(targetGameId).emit('opponent_connection_state', {
+        state: 'active',
+        playerId: socket.id,
+      });
+      console.log(`[Partida] Jogador ${socket.user.name} retornou ao primeiro plano na sala ${targetGameId}`);
     }
   });
 
@@ -506,13 +735,57 @@ io.on('connection', (socket) => {
 
   // In-game: Player crashed
   socket.on('player_crashed', (data) => {
-    if (socket.gameId) {
-      console.log(`[Game Over] Jogador bateu: ${socket.user.name} na sala ${socket.gameId}`);
-      socket.to(socket.gameId).emit('opponent_crashed', {
-        crashedPlayer: socket.user.name,
-      });
-      activeGames.delete(socket.gameId);
+    let targetGameId = (data && data.gameId) || socket.gameId;
+
+    if (!targetGameId) {
+      for (const [gId, g] of activeGames.entries()) {
+        if (g.players.includes(socket.id)) {
+          targetGameId = gId;
+          break;
+        }
+        if (Array.isArray(g.playerData)) {
+          for (const p of g.playerData) {
+            if ((socket.user?.id && p.user?.id === socket.user.id) ||
+                (socket.user?.name && p.user?.name === socket.user.name)) {
+              targetGameId = gId;
+              break;
+            }
+          }
+        }
+        if (targetGameId) break;
+      }
     }
+
+    if (!targetGameId) {
+      return;
+    }
+
+    const game = activeGames.get(targetGameId);
+    let crashedUser = (data && data.user) || socket.user;
+    let winnerUser = null;
+
+    if (game && Array.isArray(game.playerData) && game.playerData.length >= 2) {
+      let loserEntry = game.playerData.find(p => 
+        p.socketId === socket.id ||
+        (crashedUser?.id && p.user?.id === crashedUser.id) ||
+        (crashedUser?.name && p.user?.name && (
+          p.user.name === crashedUser.name ||
+          p.user.name.startsWith(crashedUser.name) ||
+          crashedUser.name.startsWith(p.user.name)
+        ))
+      );
+
+      if (!loserEntry) {
+        loserEntry = game.playerData[0];
+      }
+      const winnerEntry = game.playerData.find(p => p !== loserEntry) ||
+                          (loserEntry === game.playerData[0] ? game.playerData[1] : game.playerData[0]);
+
+      crashedUser = loserEntry.user;
+      winnerUser = winnerEntry.user;
+    }
+
+    finishGame(targetGameId, winnerUser, crashedUser, 'crashed', socket);
   });
 
   // Leave game
@@ -539,22 +812,38 @@ io.on('connection', (socket) => {
       }
     }
 
-    // If socket was in active game, grant 35s reconnect grace period
+    // If socket was in active game, grant 3.5s reconnect grace period
     if (socket.gameId) {
-      const game = activeGames.get(socket.gameId);
+      const gameId = socket.gameId;
+      const game = activeGames.get(gameId);
       if (game) {
-        socket.to(socket.gameId).emit('opponent_connection_state', {
+        io.to(gameId).emit('opponent_connection_state', {
           state: 'disconnected',
           playerId: socket.id,
         });
 
+        if (game.disconnectTimer) {
+          clearTimeout(game.disconnectTimer);
+        }
+
         game.disconnectTimer = setTimeout(() => {
-          if (activeGames.has(socket.gameId)) {
-            console.log(`[Partida] Tempo de reconexão esgotado para ${socket.user.name} na sala ${socket.gameId}`);
-            socket.to(socket.gameId).emit('opponent_left');
-            activeGames.delete(socket.gameId);
+          if (activeGames.has(gameId)) {
+            console.log(`[Partida] Tempo de reconexão esgotado para ${socket.user.name} na sala ${gameId}`);
+            let disconnectedUser = socket.user;
+            let opponentUser = null;
+            if (Array.isArray(game.playerData)) {
+              const dEntry = game.playerData.find(p => 
+                (socket.user?.id && p.user?.id === socket.user.id) ||
+                (socket.user?.name && p.user?.name === socket.user.name) ||
+                p.socketId === socket.id
+              );
+              if (dEntry) disconnectedUser = dEntry.user;
+              const opEntry = game.playerData.find(p => p !== dEntry);
+              if (opEntry) opponentUser = opEntry.user;
+            }
+            finishGame(gameId, opponentUser, disconnectedUser, 'disconnected_timeout');
           }
-        }, 12000); // 12s reconnect grace period during live match
+        }, 3500); // 3.5s reconnect grace period during live match
       }
     }
   });

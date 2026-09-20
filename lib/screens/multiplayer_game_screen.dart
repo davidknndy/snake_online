@@ -114,12 +114,29 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
         });
       };
       socketService.onOpponentCrashed = (data) {
-        if (!mounted || _gameState.status != GameStatus.playing) return;
+        if (!mounted || _gameState.status == GameStatus.gameOver) return;
+        final crashedPlayer = data['crashedPlayer']?.toString();
+        final myName = socketService.currentUser?.name;
+        if (crashedPlayer != null && myName != null &&
+            (crashedPlayer.toLowerCase() == myName.toLowerCase() ||
+             crashedPlayer.toLowerCase().startsWith('${myName.toLowerCase()} #'))) {
+          // I was the one who crashed, ignore opponent_crashed
+          return;
+        }
         _handleOpponentCrashed();
       };
       socketService.onOpponentLeft = () {
-        if (!mounted || _gameState.status != GameStatus.playing) return;
+        if (!mounted || _gameState.status == GameStatus.gameOver) return;
         _handleOpponentCrashed();
+      };
+      socketService.onMatchFinished = (data) {
+        if (!mounted || _gameState.status == GameStatus.gameOver) return;
+        final bool isWin = data['isWin'] == true;
+        if (isWin) {
+          _handleOpponentCrashed();
+        } else {
+          _handlePlayerCrashed();
+        }
       };
     } else {
       // Seed opponent survival lifetime based on difficulty for bot practice
@@ -136,18 +153,49 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (widget.isRealMatch) {
+      final socketService = Provider.of<SocketService>(context, listen: false);
+      if (state == AppLifecycleState.paused ||
+          state == AppLifecycleState.inactive ||
+          state == AppLifecycleState.hidden) {
+        if (_gameState.status == GameStatus.playing) {
+          socketService.notifyAppMinimized();
+        }
+      } else if (state == AppLifecycleState.resumed) {
+        if (_gameState.status == GameStatus.playing) {
+          socketService.notifyAppResumed();
+        }
+      }
+    }
+
     if (state == AppLifecycleState.resumed) {
-      _handleAppResumed();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _handleAppResumed();
+      });
     }
   }
 
-  void _handleAppResumed() {
+  Future<void> _handleAppResumed() async {
     if (!mounted) return;
 
     if (widget.isRealMatch) {
       final socketService = Provider.of<SocketService>(context, listen: false);
       if (socketService.gameId != null) {
         socketService.reconnectGame(socketService.gameId!);
+
+        // Check if game already finished on server while we were away
+        final status = await socketService.checkGameStatus(socketService.gameId!);
+        if (!mounted) return;
+
+        if (status != null && status['status'] == 'finished') {
+          final bool isWin = status['isWin'] == true;
+          if (isWin) {
+            _handleOpponentCrashed();
+          } else {
+            _handlePlayerCrashed();
+          }
+          return;
+        }
       }
     }
 
@@ -181,7 +229,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
     final stepMs = _moveController.duration?.inMilliseconds ?? 280;
 
     if (stepMs > 0 && elapsedMs >= stepMs) {
-      final missedSteps = elapsedMs ~/ stepMs;
+      final missedSteps = (elapsedMs ~/ stepMs).clamp(0, 30);
 
       for (int i = 0; i < missedSteps; i++) {
         _updateGame();
@@ -192,18 +240,36 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
         }
       }
 
-      // Catch up match timer
+      // Catch up match timer with setState so screen updates immediately
       final elapsedSec = elapsedMs ~/ 1000;
       if (elapsedSec > 0) {
-        if (!_isOvertime) {
-          _remainingSeconds = (_remainingSeconds - elapsedSec).clamp(0, 120);
-        } else {
-          _overtimeSeconds += elapsedSec;
+        setState(() {
+          if (!_isOvertime) {
+            _remainingSeconds = (_remainingSeconds - elapsedSec).clamp(0, 120);
+          } else {
+            _overtimeSeconds += elapsedSec;
+          }
+        });
+
+        if (_remainingSeconds <= 0) {
+          _evaluateTwoMinuteWinner();
+          return;
         }
       }
 
-      _lastStepTime = DateTime.now();
-      _moveController.forward(from: 0.0);
+      setState(() {
+        _lastStepTime = DateTime.now();
+      });
+    }
+
+    // Always ensure movement and match timers are running if match is still active
+    if (_gameState.status == GameStatus.playing) {
+      if (_matchTimer == null || !_matchTimer!.isActive) {
+        _startMatchTimer();
+      }
+      if (!_moveController.isAnimating) {
+        _moveController.forward(from: 0.0);
+      }
     }
   }
 
@@ -515,6 +581,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
   // --- End Game Handlers ---
 
   void _handlePlayerCrashed() {
+    if (_gameState.status == GameStatus.gameOver) return;
     _matchTimer?.cancel();
     _opponentSimTimer?.cancel();
     _moveController.stop();
@@ -540,6 +607,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
   }
 
   void _handleOpponentCrashed() {
+    if (_gameState.status == GameStatus.gameOver) return;
     _matchTimer?.cancel();
     _opponentSimTimer?.cancel();
     _moveController.stop();
