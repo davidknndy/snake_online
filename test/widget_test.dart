@@ -717,6 +717,73 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(milliseconds: 100));
     });
+
+    testWidgets('When match is found in lobby, close button is removed and back navigation is blocked', (tester) async {
+      final mockSocket = _MockSocketService();
+      final settingsService = SettingsService();
+      final authService = AuthService();
+
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<SocketService>.value(value: mockSocket),
+            ChangeNotifierProvider<SettingsService>.value(value: settingsService),
+            ChangeNotifierProvider<AuthService>.value(value: authService),
+          ],
+          child: const MaterialApp(
+            home: MultiplayerLobbyScreen(),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      // Searching state: close button is visible
+      expect(find.byIcon(Icons.close), findsOneWidget);
+
+      // Trigger real match found
+      mockSocket.onRealMatchFound?.call({
+        'gameId': 'game_12345',
+        'matchSeed': 123456,
+        'difficulty': 'Normal',
+        'opponent': {'name': 'Player2', 'trophies': 50},
+        'isCatchUp': false,
+      });
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Match found: close button MUST NOT be present!
+      expect(find.byIcon(Icons.close), findsNothing);
+      expect(find.text('PARTIDA ENCONTRADA!'), findsOneWidget);
+
+      // Clean up
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+
+    test('Snake movement steps leading to wall collision detection during background catch-up', () {
+      final snake = Snake(
+        body: [const Position(10, 17)],
+        direction: Direction.down,
+      );
+
+      // Step 1: moves to (10, 18) - safe
+      snake.move(const Position(0, 0));
+      expect(snake.head, equals(const Position(10, 18)));
+      expect(snake.checkWallCollision(20, 20), isFalse);
+
+      // Step 2: moves to (10, 19) - edge safe perimeter
+      snake.move(const Position(0, 0));
+      expect(snake.head, equals(const Position(10, 19)));
+      expect(snake.checkWallCollision(20, 20), isFalse);
+
+      // Step 3: moves to (10, 20) - fatal wall boundary crossed!
+      snake.move(const Position(0, 0));
+      expect(snake.head, equals(const Position(10, 20)));
+      expect(snake.checkWallCollision(20, 20), isTrue);
+    });
   });
 }
 

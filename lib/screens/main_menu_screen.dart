@@ -56,11 +56,6 @@ class _MainMenuScreenState extends State<MainMenuScreen>
     
     // Start background music only if enabled
     AudioService().startBackgroundMusic();
-
-    // If not logged with Google, force account chooser to open on launch
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkAutoSignIn();
-    });
   }
 
   @override
@@ -151,25 +146,6 @@ class _MainMenuScreenState extends State<MainMenuScreen>
 
   void _onAbout() {
     Navigator.pushNamed(context, '/about');
-  }
-
-  bool _hasCheckedAutoSignIn = false;
-
-  void _checkAutoSignIn() {
-    if (_hasCheckedAutoSignIn || !mounted) return;
-    _hasCheckedAutoSignIn = true;
-
-    final authService = Provider.of<AuthService>(context, listen: false);
-
-    // If user is already authenticated (restored from previous session), open with that account
-    if (authService.isAuthenticated) {
-      debugPrint('Conta já conectada anteriormente: ${authService.currentUser?.name}');
-      return;
-    }
-
-    // Once the game opens, and isn't logged with google, force it to always open to choose the account
-    debugPrint('Usuário não conectado. Abrindo seletor de contas do Google...');
-    _triggerGoogleSignIn(isAutomatic: true);
   }
 
   void _onGoogleSignIn() {

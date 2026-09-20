@@ -39,7 +39,7 @@ class MultiplayerGameScreen extends StatefulWidget {
 }
 
 class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   late AnimationController _moveController;
   late AnimationController _countdownAnimController;
 
@@ -51,6 +51,8 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
 
   int _introCountdown = 3; // 3, 2, 1, 0 (Go!)
   bool _isIntroActive = true;
+  DateTime? _introStartTime;
+  DateTime _lastStepTime = DateTime.now();
 
   int _remainingSeconds = 120; // 2 minutes
   int _currentStage = 0;
@@ -70,6 +72,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     final initialDuration = SettingsService.getSpeedForStage(
       widget.initialSpeedIndex,
@@ -90,6 +93,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
       if (status == AnimationStatus.completed) {
         if (!_isIntroActive && _gameState.status == GameStatus.playing) {
           _updateGame();
+          _lastStepTime = DateTime.now();
           if (_gameState.status == GameStatus.playing) {
             _moveController.forward(from: 0.0);
           }
@@ -113,6 +117,10 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
         if (!mounted || _gameState.status != GameStatus.playing) return;
         _handleOpponentCrashed();
       };
+      socketService.onOpponentLeft = () {
+        if (!mounted || _gameState.status != GameStatus.playing) return;
+        _handleOpponentCrashed();
+      };
     } else {
       // Seed opponent survival lifetime based on difficulty for bot practice
       final rand = Random(widget.matchSeed);
@@ -124,6 +132,79 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
 
     _initializeGame();
     _startIntroCountdown();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _handleAppResumed();
+    }
+  }
+
+  void _handleAppResumed() {
+    if (!mounted) return;
+
+    if (widget.isRealMatch) {
+      final socketService = Provider.of<SocketService>(context, listen: false);
+      if (socketService.gameId != null) {
+        socketService.reconnectGame(socketService.gameId!);
+      }
+    }
+
+    if (_gameState.status != GameStatus.playing && !_isIntroActive) {
+      return;
+    }
+
+    final now = DateTime.now();
+
+    // If app was minimized during intro countdown
+    if (_isIntroActive && _introStartTime != null) {
+      final introElapsedMs = now.difference(_introStartTime!).inMilliseconds;
+      if (introElapsedMs >= 3000) {
+        _introCountdownTimer?.cancel();
+        _introCountdown = 0;
+        _isIntroActive = false;
+        _gameState = _gameState.copyWith(status: GameStatus.playing);
+        _startMatchTimer();
+        if (!widget.isRealMatch) {
+          _startOpponentSimulation();
+        }
+        final gamePlayElapsedMs = introElapsedMs - 3000;
+        _lastStepTime = now.subtract(Duration(milliseconds: gamePlayElapsedMs));
+      } else {
+        return;
+      }
+    }
+
+    // Catch up snake movement for the time spent in background
+    final elapsedMs = now.difference(_lastStepTime).inMilliseconds;
+    final stepMs = _moveController.duration?.inMilliseconds ?? 280;
+
+    if (stepMs > 0 && elapsedMs >= stepMs) {
+      final missedSteps = elapsedMs ~/ stepMs;
+
+      for (int i = 0; i < missedSteps; i++) {
+        _updateGame();
+        _lastStepTime = DateTime.now();
+        if (_gameState.status != GameStatus.playing) {
+          // Snake crashed into wall or itself during background simulation!
+          return;
+        }
+      }
+
+      // Catch up match timer
+      final elapsedSec = elapsedMs ~/ 1000;
+      if (elapsedSec > 0) {
+        if (!_isOvertime) {
+          _remainingSeconds = (_remainingSeconds - elapsedSec).clamp(0, 120);
+        } else {
+          _overtimeSeconds += elapsedSec;
+        }
+      }
+
+      _lastStepTime = DateTime.now();
+      _moveController.forward(from: 0.0);
+    }
   }
 
   void _initializeGame() {
@@ -188,6 +269,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
   }
 
   void _startIntroCountdown() {
+    _introStartTime = DateTime.now();
     _countdownAnimController.forward(from: 0.0);
     AudioService().playDirectionChange();
 
@@ -213,6 +295,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
           if (!widget.isRealMatch) {
             _startOpponentSimulation();
           }
+          _lastStepTime = DateTime.now();
           _moveController.forward(from: 0.0);
         }
       });
@@ -765,6 +848,11 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
 
   // Back button handler: DO NOT PAUSE GAME (user requirement)
   Future<void> _handleBackButton() async {
+    if (_isIntroActive) {
+      // Never allow leaving when match has just started!
+      return;
+    }
+
     if (_gameState.status == GameStatus.gameOver) {
       Navigator.of(context).popUntil((route) => route.isFirst);
       return;
@@ -898,6 +986,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _matchTimer?.cancel();
     _opponentSimTimer?.cancel();
     _announcementTimer?.cancel();
@@ -908,6 +997,7 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
       final socketService = Provider.of<SocketService>(context, listen: false);
       socketService.onOpponentAppleEaten = null;
       socketService.onOpponentCrashed = null;
+      socketService.onOpponentLeft = null;
     }
     AudioService().resumeBackgroundMusic();
     super.dispose();
@@ -924,10 +1014,12 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
       child: Scaffold(
         backgroundColor: SnakeTheme.background,
         appBar: AppBar(
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: _handleBackButton,
-          ),
+          leading: _isIntroActive
+              ? const SizedBox.shrink()
+              : IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  onPressed: _handleBackButton,
+                ),
           title: Text(
             'Online: ${widget.playerName} VS ${widget.opponentName}',
             style: const TextStyle(
@@ -966,10 +1058,15 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
                               ),
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(5),
-                                child: GameBoard(
-                                  gameState: _gameState,
-                                  animationProgress: _moveController.value,
-                                  onDirectionChange: _onDirectionChange,
+                                child: AnimatedBuilder(
+                                  animation: _moveController,
+                                  builder: (context, _) {
+                                    return GameBoard(
+                                      gameState: _gameState,
+                                      animationProgress: _moveController.value,
+                                      onDirectionChange: _onDirectionChange,
+                                    );
+                                  },
                                 ),
                               ),
                             ),
@@ -1019,10 +1116,15 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
                         ),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(5),
-                          child: GameBoard(
-                            gameState: _gameState,
-                            animationProgress: _moveController.value,
-                            onDirectionChange: _onDirectionChange,
+                          child: AnimatedBuilder(
+                            animation: _moveController,
+                            builder: (context, _) {
+                              return GameBoard(
+                                gameState: _gameState,
+                                animationProgress: _moveController.value,
+                                onDirectionChange: _onDirectionChange,
+                              );
+                            },
                           ),
                         ),
                       ),

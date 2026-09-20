@@ -394,6 +394,10 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
       canPop: false,
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop) return;
+        if (_state == LobbyState.matched) {
+          // Block back button completely when match is found
+          return;
+        }
         final shouldCancel = await _showCancelConfirmationDialog();
         if (shouldCancel && mounted) {
           _cancelMatchmaking();
@@ -412,15 +416,18 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
             ),
           ),
           centerTitle: true,
-          leading: IconButton(
-            icon: const Icon(Icons.close),
-            onPressed: () async {
-              final shouldCancel = await _showCancelConfirmationDialog();
-              if (shouldCancel && mounted) {
-                _cancelMatchmaking();
-              }
-            },
-          ),
+          leading: _state == LobbyState.matched
+              ? const SizedBox.shrink()
+              : IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () async {
+                    if (_state == LobbyState.matched) return;
+                    final shouldCancel = await _showCancelConfirmationDialog();
+                    if (shouldCancel && mounted) {
+                      _cancelMatchmaking();
+                    }
+                  },
+                ),
         ),
       body: SafeArea(
         child: LayoutBuilder(

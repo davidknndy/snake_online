@@ -554,7 +554,7 @@ io.on('connection', (socket) => {
             socket.to(socket.gameId).emit('opponent_left');
             activeGames.delete(socket.gameId);
           }
-        }, 35000);
+        }, 12000); // 12s reconnect grace period during live match
       }
     }
   });
