@@ -61,7 +61,7 @@ class SettingsService extends ChangeNotifier {
   int _highScore = 0;
   int _gamesPlayed = 0;
   int _trophies = 0;
-  static const String defaultServerUrl = 'http://192.168.0.8:3000';
+  static const String defaultServerUrl = 'https://snake-online-server-uxpy.onrender.com';
   String _serverUrl = defaultServerUrl;
 
   // Getters
@@ -113,7 +113,12 @@ class SettingsService extends ChangeNotifier {
     _highScore = _prefs!.getInt(_highScoreKey) ?? 0;
     _gamesPlayed = _prefs!.getInt(_gamesPlayedKey) ?? 0;
     _trophies = _prefs!.getInt(_trophiesKey) ?? 0;
-    _serverUrl = _prefs!.getString(_serverUrlKey) ?? defaultServerUrl;
+    final savedUrl = _prefs!.getString(_serverUrlKey);
+    if (savedUrl == null || savedUrl.contains('localhost') || savedUrl.contains('192.168.') || savedUrl.contains('10.0.2.2')) {
+      _serverUrl = defaultServerUrl;
+    } else {
+      _serverUrl = savedUrl;
+    }
 
     notifyListeners();
   }

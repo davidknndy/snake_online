@@ -6,7 +6,8 @@ import '../models/snake_model.dart';
 import '../models/user_model.dart';
 
 class SocketService extends ChangeNotifier {
-  static const String _defaultServerUrl = 'http://localhost:3000'; // TODO: Replace with your server URL
+  static const String defaultServerUrl = 'https://snake-online-server-uxpy.onrender.com';
+  static const String gameSecretToken = 'dk_snake_live_sec_78f29a0b12';
   
   io.Socket? _socket;
   bool _isConnected = false;
@@ -44,12 +45,14 @@ class SocketService extends ChangeNotifier {
     
     try {
       _socket = io.io(
-        serverUrl ?? _defaultServerUrl,
+        serverUrl ?? defaultServerUrl,
         io.OptionBuilder()
             .setTransports(['websocket'])
             .enableReconnection()
             .setReconnectionAttempts(5)
             .setReconnectionDelay(1000)
+            .setAuth({'token': gameSecretToken})
+            .setExtraHeaders({'x-game-token': gameSecretToken})
             .build(),
       );
       

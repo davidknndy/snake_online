@@ -353,7 +353,7 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
                               ? 'Servidor Conectado • Fila Online Ativa'
                               : (isConnecting
                                   ? 'Conectando ao servidor...'
-                                  : 'Servidor Offline (${settings.serverUrl})'),
+                                  : 'Servidor Offline (Tentando reconectar...)'),
                           style: TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.bold,

@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
+app.disable('x-powered-by');
 app.use(cors());
 
 const server = http.createServer(app);
@@ -15,6 +16,38 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 3000;
+const GAME_SECRET_TOKEN = process.env.GAME_SECRET || 'dk_snake_live_sec_78f29a0b12';
+
+// Rate limiting by IP for connection attempts
+const connectionAttempts = new Map();
+const MAX_CONNECTIONS_PER_MINUTE = 25;
+
+// Socket.io security middleware: Token authentication & rate limit
+io.use((socket, next) => {
+  const ip = socket.handshake.address;
+  const now = Date.now();
+  const history = (connectionAttempts.get(ip) || []).filter(t => now - t < 60000);
+  history.push(now);
+  connectionAttempts.set(ip, history);
+
+  if (history.length > MAX_CONNECTIONS_PER_MINUTE) {
+    console.warn(`[Security] Rate limit excedido para IP: ${ip}`);
+    return next(new Error('Rate limit exceeded'));
+  }
+
+  const clientToken = socket.handshake.auth?.token || socket.handshake.headers?.['x-game-token'];
+  if (clientToken !== GAME_SECRET_TOKEN) {
+    console.warn(`[Security] Conexão bloqueada sem token válido de ${ip}`);
+    return next(new Error('Unauthorized'));
+  }
+
+  next();
+});
+
+// Stealth mode: Return 404 for any direct browser / HTTP probe
+app.use((req, res) => {
+  res.status(404).send('Not Found');
+});
 
 // Matchmaking queues separated by difficulty
 const queues = {
@@ -32,19 +65,6 @@ function removeFromAllQueues(socket) {
     queues[diff] = queues[diff].filter((item) => item.socket.id !== socket.id);
   }
 }
-
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    connectedPlayers: io.engine.clientsCount,
-    queues: {
-      Normal: queues['Normal'].length,
-      'Difícil': queues['Difícil'].length,
-      'Muito Difícil': queues['Muito Difícil'].length,
-    },
-    activeGames: activeGames.size,
-  });
-});
 
 io.on('connection', (socket) => {
   console.log(`[Socket] Conectado: ${socket.id}`);
