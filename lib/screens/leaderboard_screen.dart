@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/leaderboard_service.dart';
 import '../services/auth_service.dart';
+import '../services/settings_service.dart';
 import '../utils/theme.dart';
 
 class LeaderboardScreen extends StatefulWidget {
@@ -22,9 +23,22 @@ class _LeaderboardScreenState extends State<LeaderboardScreen>
     
     // Load leaderboards when screen opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final leaderboardService = Provider.of<LeaderboardService>(context, listen: false);
-      leaderboardService.fetchWorldwideLeaderboard();
+      _refreshWorldwideLeaderboard();
     });
+  }
+
+  void _refreshWorldwideLeaderboard() {
+    if (!mounted) return;
+    final leaderboardService = Provider.of<LeaderboardService>(context, listen: false);
+    final authService = Provider.of<AuthService>(context, listen: false);
+    final settingsService = Provider.of<SettingsService>(context, listen: false);
+
+    leaderboardService.fetchWorldwideLeaderboard(
+      currentPlayerName: authService.currentUser?.name,
+      trophies: settingsService.trophies,
+      highScore: settingsService.highScore,
+      serverUrl: settingsService.serverUrl,
+    );
   }
 
   @override
@@ -71,10 +85,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen>
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: () {
-              final leaderboardService = Provider.of<LeaderboardService>(context, listen: false);
-              leaderboardService.fetchWorldwideLeaderboard();
-            },
+            onPressed: _refreshWorldwideLeaderboard,
           ),
         ],
       ),

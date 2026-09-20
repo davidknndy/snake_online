@@ -1,6 +1,8 @@
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'socket_service.dart';
 
 class LeaderboardService extends ChangeNotifier {
   static const String _localLeaderboardKey = 'local_leaderboard';
@@ -298,84 +300,89 @@ class LeaderboardService extends ChangeNotifier {
     return entry.trophies;
   }
 
-  // Fetch worldwide leaderboard (placeholder for future API implementation)
-  Future<void> fetchWorldwideLeaderboard() async {
+  // Fetch worldwide leaderboard from real server (strictly real players only, no mock users)
+  Future<void> fetchWorldwideLeaderboard({
+    String? currentPlayerName,
+    int? trophies,
+    int? highScore,
+    String? serverUrl,
+  }) async {
     _isLoading = true;
     _error = null;
     notifyListeners();
 
     try {
-      // TODO: Replace with actual API endpoint when backend is ready
-      // For now, simulate network delay and return mock data
-      await Future.delayed(const Duration(seconds: 2));
-      
-      _worldwideLeaderboard = _generateMockWorldwideData();
+      final targetUrl = serverUrl ?? SocketService.defaultServerUrl;
+      final uri = Uri.parse('$targetUrl/api/leaderboard');
+
+      int bestScore = highScore ?? 0;
+      if (_localLeaderboard.isNotEmpty) {
+        final localMax = _localLeaderboard.map((e) => e.score).reduce((a, b) => a > b ? a : b);
+        if (localMax > bestScore) bestScore = localMax;
+      }
+      final currentTrophies = trophies ?? (_localLeaderboard.isNotEmpty ? _localLeaderboard.first.trophies : 0);
+      final cleanName = (currentPlayerName != null && currentPlayerName.trim().isNotEmpty)
+          ? currentPlayerName.trim()
+          : (_localLeaderboard.isNotEmpty ? _localLeaderboard.first.playerName : 'Você');
+
+      List<LeaderboardEntry> serverEntries = [];
+
+      try {
+        // Sync current real player's stats to the server
+        if (bestScore > 0 || currentTrophies > 0 || cleanName != 'Você') {
+          await http.post(
+            uri,
+            headers: {
+              'Content-Type': 'application/json',
+              'x-game-token': SocketService.gameSecretToken,
+            },
+            body: json.encode({
+              'playerName': cleanName,
+              'score': bestScore,
+              'trophies': currentTrophies,
+            }),
+          ).timeout(const Duration(seconds: 4));
+        }
+
+        // Fetch current live leaderboard of real players
+        final response = await http.get(
+          uri,
+          headers: {'x-game-token': SocketService.gameSecretToken},
+        ).timeout(const Duration(seconds: 4));
+
+        if (response.statusCode == 200) {
+          final List<dynamic> data = json.decode(response.body);
+          serverEntries = data
+              .map((item) => LeaderboardEntry.fromJson(item))
+              .toList();
+        }
+      } catch (e) {
+        debugPrint('Could not reach remote leaderboard API: $e');
+      }
+
+      if (serverEntries.isNotEmpty) {
+        _worldwideLeaderboard = serverEntries;
+      } else {
+        // Only real players: If server has no other players yet, show only the current real player
+        _worldwideLeaderboard = [
+          LeaderboardEntry(
+            id: 'real_player_me',
+            playerName: cleanName,
+            score: bestScore,
+            trophies: currentTrophies,
+            timestamp: DateTime.now(),
+            isLocal: false,
+          ),
+        ];
+      }
       _error = null;
     } catch (e) {
-      _error = 'Failed to load worldwide leaderboard: $e';
+      _error = 'Falha ao carregar classificação mundial';
       debugPrint('Error fetching worldwide leaderboard: $e');
     } finally {
       _isLoading = false;
       notifyListeners();
     }
-  }
-
-  // Generate mock worldwide leaderboard data
-  List<LeaderboardEntry> _generateMockWorldwideData() {
-    final mockData = [
-      LeaderboardEntry(
-        id: 'world_1',
-        playerName: 'SnakeMaster2024',
-        score: 1250,
-        trophies: 145,
-        timestamp: DateTime.now().subtract(const Duration(hours: 2)),
-        isLocal: false,
-      ),
-      LeaderboardEntry(
-        id: 'world_2',
-        playerName: 'RetroGamer',
-        score: 980,
-        trophies: 132,
-        timestamp: DateTime.now().subtract(const Duration(hours: 5)),
-        isLocal: false,
-      ),
-      LeaderboardEntry(
-        id: 'world_3',
-        playerName: 'SpeedSnake',
-        score: 875,
-        trophies: 128,
-        timestamp: DateTime.now().subtract(const Duration(hours: 8)),
-        isLocal: false,
-      ),
-      LeaderboardEntry(
-        id: 'world_4',
-        playerName: 'ClassicFan',
-        score: 720,
-        trophies: 115,
-        timestamp: DateTime.now().subtract(const Duration(days: 1)),
-        isLocal: false,
-      ),
-      LeaderboardEntry(
-        id: 'world_5',
-        playerName: 'PixelPro',
-        score: 650,
-        trophies: 98,
-        timestamp: DateTime.now().subtract(const Duration(days: 2)),
-        isLocal: false,
-      ),
-    ];
-
-    // Add some of the local scores to simulate mixed leaderboard
-    mockData.addAll(_localLeaderboard.take(3).map((entry) => 
-      entry.copyWith(isLocal: false, playerName: '${entry.playerName} (Você)')));
-
-    // Sort by trophies, then by score
-    mockData.sort((a, b) {
-      final trophyCompare = b.trophies.compareTo(a.trophies);
-      return trophyCompare != 0 ? trophyCompare : b.score.compareTo(a.score);
-    });
-
-    return mockData.take(10).toList();
   }
 
   // Get player rank in local leaderboard
@@ -432,13 +439,27 @@ class LeaderboardService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Submit score to worldwide leaderboard (future API integration)
-  Future<void> submitWorldwideScore(String playerName, int score, int trophies) async {
-    // TODO: Implement API call to submit score to worldwide leaderboard
-    // This would require a backend server with user authentication
-    
-    // For now, just add to local leaderboard
+  // Submit score to worldwide leaderboard
+  Future<void> submitWorldwideScore(String playerName, int score, int trophies, {String? serverUrl}) async {
     await addLocalScore(playerName, score, trophies);
+    try {
+      final targetUrl = serverUrl ?? SocketService.defaultServerUrl;
+      final uri = Uri.parse('$targetUrl/api/leaderboard');
+      await http.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-game-token': SocketService.gameSecretToken,
+        },
+        body: json.encode({
+          'playerName': playerName,
+          'score': score,
+          'trophies': trophies,
+        }),
+      ).timeout(const Duration(seconds: 4));
+    } catch (e) {
+      debugPrint('Error submitting score to server: $e');
+    }
   }
 }
 

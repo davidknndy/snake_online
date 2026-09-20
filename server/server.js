@@ -44,6 +44,55 @@ io.use((socket, next) => {
   next();
 });
 
+// Worldwide leaderboard of real players
+let worldwideLeaderboard = [];
+
+// Secure API endpoints for Worldwide Leaderboard
+app.use(express.json());
+
+app.get('/api/leaderboard', (req, res) => {
+  const token = req.headers['x-game-token'];
+  if (token !== GAME_SECRET_TOKEN) {
+    return res.status(401).send('Unauthorized');
+  }
+  res.json(worldwideLeaderboard);
+});
+
+app.post('/api/leaderboard', (req, res) => {
+  const token = req.headers['x-game-token'];
+  if (token !== GAME_SECRET_TOKEN) {
+    return res.status(401).send('Unauthorized');
+  }
+  const data = req.body;
+  if (!data || !data.playerName) {
+    return res.status(400).json({ error: 'Missing playerName' });
+  }
+  const cleanName = data.playerName.trim();
+  const existingIndex = worldwideLeaderboard.findIndex(
+    p => p.playerName.toLowerCase() === cleanName.toLowerCase()
+  );
+  const entry = {
+    id: data.id || `player_${Date.now()}`,
+    playerName: cleanName,
+    score: Number(data.score) || 0,
+    trophies: Number(data.trophies) || 0,
+    timestamp: new Date().toISOString(),
+    isLocal: false,
+  };
+  if (existingIndex !== -1) {
+    worldwideLeaderboard[existingIndex] = {
+      ...worldwideLeaderboard[existingIndex],
+      score: Math.max(worldwideLeaderboard[existingIndex].score, entry.score),
+      trophies: entry.trophies,
+      timestamp: entry.timestamp,
+    };
+  } else {
+    worldwideLeaderboard.push(entry);
+  }
+  worldwideLeaderboard.sort((a, b) => (b.trophies - a.trophies) || (b.score - a.score));
+  res.json(worldwideLeaderboard);
+});
+
 // Stealth mode: Return 404 for any direct browser / HTTP probe
 app.use((req, res) => {
   res.status(404).send('Not Found');
@@ -84,6 +133,41 @@ io.on('connection', (socket) => {
       };
       console.log(`[Auth] Jogador autenticado: ${socket.user.name} (${socket.user.trophies} troféus)`);
     }
+  });
+
+  // Worldwide leaderboard query via socket
+  socket.on('get_worldwide_leaderboard', (ack) => {
+    if (typeof ack === 'function') {
+      ack(worldwideLeaderboard);
+    }
+  });
+
+  // Submit score via socket
+  socket.on('submit_worldwide_score', (data) => {
+    if (!data || !data.playerName) return;
+    const cleanName = data.playerName.trim();
+    const existingIndex = worldwideLeaderboard.findIndex(
+      p => p.playerName.toLowerCase() === cleanName.toLowerCase()
+    );
+    const entry = {
+      id: socket.user.id,
+      playerName: cleanName,
+      score: Number(data.score) || 0,
+      trophies: Number(data.trophies) || 0,
+      timestamp: new Date().toISOString(),
+      isLocal: false,
+    };
+    if (existingIndex !== -1) {
+      worldwideLeaderboard[existingIndex] = {
+        ...worldwideLeaderboard[existingIndex],
+        score: Math.max(worldwideLeaderboard[existingIndex].score, entry.score),
+        trophies: entry.trophies,
+        timestamp: entry.timestamp,
+      };
+    } else {
+      worldwideLeaderboard.push(entry);
+    }
+    worldwideLeaderboard.sort((a, b) => (b.trophies - a.trophies) || (b.score - a.score));
   });
 
   // Player ping check
