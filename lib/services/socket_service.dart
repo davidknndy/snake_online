@@ -30,7 +30,6 @@ class SocketService extends ChangeNotifier {
   Function(Map<String, dynamic>)? onRealMatchFound;
   Function(Map<String, dynamic>)? onOpponentAppleEaten;
   Function(Map<String, dynamic>)? onOpponentCrashed;
-  Function(Map<String, dynamic>)? onMatchFinished;
   Function()? onMatchmakingCanceled;
   
   // Getters
@@ -40,7 +39,6 @@ class SocketService extends ChangeNotifier {
   String? get error => _error;
   String? get gameId => _gameId;
   Map<String, dynamic>? get lastActiveMatch => _lastActiveMatch;
-  User? get currentUser => _currentUser;
   
   // Initialize socket connection
   Future<void> connect({String? serverUrl, User? user}) async {
@@ -122,11 +120,6 @@ class SocketService extends ChangeNotifier {
       if (_gameId != null) {
         _socket!.emit('reconnect_game', {'gameId': _gameId});
       }
-
-      // If player crashed while offline/resuming, guarantee delivery now
-      if (_pendingPlayerCrash) {
-        _sendPendingCrashIfPossible();
-      }
     });
     
     _socket!.onDisconnect((_) {
@@ -171,12 +164,6 @@ class SocketService extends ChangeNotifier {
         onOpponentCrashed?.call(Map<String, dynamic>.from(data));
       } else {
         onOpponentCrashed?.call({});
-      }
-    });
-
-    _socket!.on('match_finished', (data) {
-      if (data is Map) {
-        onMatchFinished?.call(Map<String, dynamic>.from(data));
       }
     });
     
@@ -307,56 +294,6 @@ class SocketService extends ChangeNotifier {
     }
   }
 
-  void notifyAppMinimized() {
-    if (!_isConnected || _socket == null || _gameId == null) return;
-    _socket!.emit('player_minimized', {
-      'gameId': _gameId,
-      'user': _currentUser?.toJson(),
-    });
-  }
-
-  void notifyAppResumed() {
-    if (!_isConnected || _socket == null || _gameId == null) return;
-    _socket!.emit('player_resumed', {
-      'gameId': _gameId,
-      'user': _currentUser?.toJson(),
-    });
-  }
-
-  Future<Map<String, dynamic>?> checkGameStatus(String gameId) async {
-    if (_socket == null) return null;
-    if (!_isConnected || !_socket!.connected) {
-      await ensureHealthyConnection(user: _currentUser);
-      int waitedMs = 0;
-      while ((!_isConnected || !_socket!.connected) && waitedMs < 1200) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        waitedMs += 100;
-      }
-    }
-    if (!_isConnected || _socket == null || !_socket!.connected) return null;
-
-    final completer = Completer<Map<String, dynamic>?>();
-    try {
-      _socket!.emitWithAck('get_game_status', {
-        'gameId': gameId,
-        'user': _currentUser?.toJson(),
-      }, ack: (response) {
-        if (response is Map) {
-          if (!completer.isCompleted) {
-            completer.complete(Map<String, dynamic>.from(response));
-          }
-        } else {
-          if (!completer.isCompleted) {
-            completer.complete(null);
-          }
-        }
-      });
-      return await completer.future.timeout(const Duration(milliseconds: 2000));
-    } catch (_) {
-      return null;
-    }
-  }
-
   void sendAppleEaten({required int apples, required int length, required int score}) {
     if (!_isConnected || _socket == null) return;
     _socket!.emit('player_apple_eaten', {
@@ -366,30 +303,9 @@ class SocketService extends ChangeNotifier {
     });
   }
 
-  bool _pendingPlayerCrash = false;
-
   void sendPlayerCrashed() {
-    _pendingPlayerCrash = true;
-    _sendPendingCrashIfPossible();
-  }
-
-  void _sendPendingCrashIfPossible() {
-    if (!_pendingPlayerCrash) return;
-
-    if (_isConnected && _socket != null && _socket!.connected) {
-      debugPrint('[Socket] Enviando player_crashed: gameId=$_gameId');
-      _socket!.emit('player_crashed', {
-        'gameId': _gameId,
-        'user': _currentUser?.toJson(),
-      });
-      _socket!.emit('player_crashed');
-      _pendingPlayerCrash = false;
-    } else {
-      debugPrint('[Socket] Conexão indisponível ao bater. Aguardando reconexão...');
-      if (_currentUser != null) {
-        ensureHealthyConnection(user: _currentUser);
-      }
-    }
+    if (!_isConnected || _socket == null) return;
+    _socket!.emit('player_crashed');
   }
   
   Future<void> cancelMatchmaking() async {
@@ -427,7 +343,6 @@ class SocketService extends ChangeNotifier {
   Future<void> leaveGame() async {
     _isSearchingMatch = false;
     _lastActiveMatch = null;
-    _pendingPlayerCrash = false;
     if (_isConnected && _socket != null && _gameId != null) {
       _socket!.emit('leave_game', {'gameId': _gameId});
     }
@@ -511,11 +426,6 @@ class SocketService extends ChangeNotifier {
   /// forces a fresh connection while preserving matchmaking state.
   Future<void> ensureHealthyConnection({String? serverUrl, User? user}) async {
     if (user != null) _currentUser = user;
-
-    if (_isConnecting) {
-      debugPrint('ensureHealthyConnection: conexão já em andamento, ignorando chamada redundante');
-      return;
-    }
 
     // Check the ACTUAL native socket state, not our cached _isConnected
     if (_socket != null && _socket!.connected) {
