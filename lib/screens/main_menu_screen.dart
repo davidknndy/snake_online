@@ -56,11 +56,6 @@ class _MainMenuScreenState extends State<MainMenuScreen>
     
     // Start background music only if enabled
     AudioService().startBackgroundMusic();
-
-    // If not logged with Google, force account chooser to open on launch
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkAutoSignIn();
-    });
   }
 
   @override
@@ -153,39 +148,18 @@ class _MainMenuScreenState extends State<MainMenuScreen>
     Navigator.pushNamed(context, '/about');
   }
 
-  bool _hasCheckedAutoSignIn = false;
-
-  void _checkAutoSignIn() {
-    if (_hasCheckedAutoSignIn || !mounted) return;
-    _hasCheckedAutoSignIn = true;
-
-    final authService = Provider.of<AuthService>(context, listen: false);
-
-    // If user is already authenticated (restored from previous session), open with that account
-    if (authService.isAuthenticated) {
-      debugPrint('Conta já conectada anteriormente: ${authService.currentUser?.name}');
-      return;
-    }
-
-    // Once the game opens, and isn't logged with google, force it to always open to choose the account
-    debugPrint('Usuário não conectado. Abrindo seletor de contas do Google...');
-    _triggerGoogleSignIn(isAutomatic: true);
-  }
-
   void _onGoogleSignIn() {
-    _triggerGoogleSignIn(isAutomatic: false);
+    _triggerGoogleSignIn();
   }
 
-  Future<void> _triggerGoogleSignIn({bool isAutomatic = false}) async {
+  Future<void> _triggerGoogleSignIn() async {
     final authService = Provider.of<AuthService>(context, listen: false);
     
-    if (authService.isAuthenticated && !isAutomatic) {
+    if (authService.isAuthenticated) {
       // User is already signed in, show sign out option
       _showSignOutDialog();
       return;
     }
-
-    if (authService.isAuthenticated) return;
 
     // Force account chooser so user can choose account
     final success = await authService.signInWithGoogle(forceAccountChooser: true);
@@ -196,7 +170,7 @@ class _MainMenuScreenState extends State<MainMenuScreen>
           backgroundColor: SnakeTheme.primaryGreen,
         ),
       );
-    } else if (mounted && authService.error != null && !isAutomatic) {
+    } else if (mounted && authService.error != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(authService.error!),

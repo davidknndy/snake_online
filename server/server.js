@@ -118,10 +118,7 @@ function findActiveGameForUser(user) {
       if (Array.isArray(game.playerData)) {
         for (const p of game.playerData) {
           const matchesId = user.id && p.user && p.user.id && (p.user.id === user.id);
-          const matchesName = user.name && p.user && p.user.name &&
-            (p.user.name.trim().toLowerCase() === user.name.trim().toLowerCase() ||
-             p.user.name.startsWith(`${user.name} #`));
-          if (matchesId || matchesName) {
+          if (matchesId) {
             console.log(`[findActiveGame] Partida encontrada para ${user.name} (id=${user.id}): gameId=${gameId}, age=${Math.round(age/1000)}s`);
             return { game, myPlayerData: p };
           }
@@ -140,16 +137,14 @@ function removeFromAllQueues(socketId) {
   }
 }
 
-// Helper to remove a user from all queues by user identity (ID or name)
+// Helper to remove a user from all queues by user identity (ID)
 function removeUserFromAllQueues(user) {
   if (!user) return;
   for (const diff of Object.keys(queues)) {
     const before = queues[diff].length;
     queues[diff] = queues[diff].filter((item) => {
       const matchesId = user.id && item.user && item.user.id && (item.user.id === user.id);
-      const matchesName = user.name && item.user && item.user.name &&
-        (item.user.name.trim().toLowerCase() === user.name.trim().toLowerCase());
-      return !matchesId && !matchesName;
+      return !matchesId;
     });
     if (queues[diff].length < before) {
       console.log(`[Fila] Removido jogador antigo ${user.name} da fila ${diff} (limpeza por identidade)`);
@@ -484,8 +479,7 @@ io.on('connection', (socket) => {
       }
       if (Array.isArray(game.playerData)) {
         const myP = game.playerData.find(p => 
-          (socket.user?.id && p.user?.id === socket.user.id) || 
-          (socket.user?.name && p.user?.name === socket.user.name)
+          (socket.user?.id && p.user?.id === socket.user.id)
         );
         if (myP) myP.socketId = socket.id;
       }
