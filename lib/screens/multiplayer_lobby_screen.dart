@@ -23,7 +23,7 @@ class MultiplayerLobbyScreen extends StatefulWidget {
 }
 
 class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   late AnimationController _radarController;
   late AnimationController _pulseController;
   late AnimationController _matchFoundController;
@@ -31,6 +31,8 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
   LobbyState _state = LobbyState.searching;
   Timer? _searchTimer;
   Timer? _countdownTimer;
+  Timer? _queueHeartbeatTimer;
+  SocketService? _socketService;
 
   int _searchSeconds = 0;
   int _matchCountdown = 3;
@@ -58,6 +60,7 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     _radarController = AnimationController(
       vsync: this,
@@ -75,6 +78,42 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
     );
 
     _startMatchmaking();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _socketService = Provider.of<SocketService>(context, listen: false);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
+    if (lifecycleState == AppLifecycleState.resumed) {
+      if (!mounted) return;
+      if (_state == LobbyState.matched) {
+        // Match already found while in background, navigate immediately
+        _countdownTimer?.cancel();
+        _navigateToGame();
+        return;
+      }
+      if (_state == LobbyState.searching) {
+        final socketService = Provider.of<SocketService>(context, listen: false);
+        final settings = Provider.of<SettingsService>(context, listen: false);
+        final auth = Provider.of<AuthService>(context, listen: false);
+
+        // Ensure we have a truly healthy socket connection.
+        // When Android suspends the Dart isolate (app backgrounded), the
+        // native WebSocket often disconnects but our cached state says
+        // "connected". ensureHealthyConnection checks the REAL native
+        // socket state and forces a fresh connection if needed.
+        // The onConnect handler auto-emits authenticate + find_match,
+        // and the server's catch-up logic finds any active game.
+        socketService.ensureHealthyConnection(
+          serverUrl: settings.serverUrl,
+          user: auth.currentUser,
+        );
+      }
+    }
   }
 
   void _startMatchmaking() {
@@ -97,6 +136,28 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
       _onRealMatchFound(data);
     };
 
+    // Periodic heartbeat to guarantee player remains queued across minimize or dual mode
+    _queueHeartbeatTimer?.cancel();
+    _queueHeartbeatTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (!mounted || _state != LobbyState.searching) {
+        timer.cancel();
+        return;
+      }
+      final s = Provider.of<SocketService>(context, listen: false);
+      final set = Provider.of<SettingsService>(context, listen: false);
+      final a = Provider.of<AuthService>(context, listen: false);
+      final diff = _getDifficultyLabel(set);
+
+      if (s.isHealthy) {
+        // Socket is truly alive at the native level — re-queue
+        s.findRealMatch(difficulty: diff, user: a.currentUser);
+      } else {
+        // Socket is stale/dead — force fresh connection
+        // onConnect handler will auto-emit authenticate + find_match
+        s.ensureHealthyConnection(serverUrl: set.serverUrl, user: a.currentUser);
+      }
+    });
+
     // Connect to server and enter queue for difficulty
     socketService.connect(serverUrl: settings.serverUrl, user: auth.currentUser).then((_) {
       if (mounted && _state == LobbyState.searching) {
@@ -107,6 +168,7 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
   }
 
   void _onRealMatchFound(Map<String, dynamic> data) {
+    _queueHeartbeatTimer?.cancel();
     _searchTimer?.cancel();
     _radarController.stop();
 
@@ -115,6 +177,7 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
     final oppTrophies = int.tryParse(opponent?['trophies']?.toString() ?? '') ?? 0;
     final seed = int.tryParse(data['matchSeed']?.toString() ?? '') ??
         DateTime.now().millisecondsSinceEpoch;
+    final isCatchUp = data['isCatchUp'] == true;
 
     setState(() {
       _state = LobbyState.matched;
@@ -125,7 +188,13 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
     });
 
     _matchFoundController.forward();
-    _startCountdownTransition();
+
+    if (isCatchUp) {
+      // Immediate transition without delay if catching up to an already ongoing match
+      _navigateToGame();
+    } else {
+      _startCountdownTransition();
+    }
   }
 
   void _startBotMatch() {
@@ -199,7 +268,83 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
     );
   }
 
+  Future<bool> _showCancelConfirmationDialog() async {
+    if (_state == LobbyState.matched) {
+      // Never allow canceling after a match has been found
+      return false;
+    }
+    if (_state != LobbyState.searching) {
+      return false;
+    }
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: SnakeTheme.cardBackground,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: SnakeTheme.lightGreen, width: 2),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: SnakeTheme.accentColor, size: 24),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Cancelar Busca?',
+                  style: GoogleFonts.pressStart2p(
+                    fontSize: 11,
+                    color: SnakeTheme.textPrimary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content: const Text(
+            'Deseja realmente cancelar o pareamento e sair da fila multiplayer?',
+            style: TextStyle(
+              color: SnakeTheme.textSecondary,
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          actionsPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text(
+                'Continuar na Fila',
+                style: TextStyle(
+                  color: SnakeTheme.accentColor,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFD32F2F),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              ),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text(
+                'Sim, Cancelar',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    return result ?? false;
+  }
+
   void _cancelMatchmaking() {
+    _queueHeartbeatTimer?.cancel();
     _searchTimer?.cancel();
     _countdownTimer?.cancel();
 
@@ -214,13 +359,14 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _queueHeartbeatTimer?.cancel();
     _searchTimer?.cancel();
     _countdownTimer?.cancel();
     _radarController.dispose();
     _pulseController.dispose();
     _matchFoundController.dispose();
-    final socketService = Provider.of<SocketService>(context, listen: false);
-    socketService.onRealMatchFound = null;
+    _socketService?.onRealMatchFound = null;
     super.dispose();
   }
 
@@ -244,303 +390,325 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
     final playerTrophies = auth.currentUser?.trophies ?? settings.trophies;
     final difficulty = _getDifficultyLabel(settings);
 
-    return Scaffold(
-      backgroundColor: SnakeTheme.background,
-      appBar: AppBar(
-        backgroundColor: SnakeTheme.darkGreen,
-        iconTheme: const IconThemeData(color: SnakeTheme.textPrimary),
-        title: Text(
-          'Lobby Multiplayer',
-          style: GoogleFonts.pressStart2p(
-            fontSize: 13,
-            color: SnakeTheme.textPrimary,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        final shouldCancel = await _showCancelConfirmationDialog();
+        if (shouldCancel && mounted) {
+          _cancelMatchmaking();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: SnakeTheme.background,
+        appBar: AppBar(
+          backgroundColor: SnakeTheme.darkGreen,
+          iconTheme: const IconThemeData(color: SnakeTheme.textPrimary),
+          title: Text(
+            'Lobby Multiplayer',
+            style: GoogleFonts.pressStart2p(
+              fontSize: 13,
+              color: SnakeTheme.textPrimary,
+            ),
+          ),
+          centerTitle: true,
+          leading: IconButton(
+            icon: const Icon(Icons.close),
+            onPressed: () async {
+              final shouldCancel = await _showCancelConfirmationDialog();
+              if (shouldCancel && mounted) {
+                _cancelMatchmaking();
+              }
+            },
           ),
         ),
-        centerTitle: true,
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: _cancelMatchmaking,
-        ),
-      ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          child: Column(
-            children: [
-              // Header: Selected Difficulty badge
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: SnakeTheme.cardBackground,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: SnakeTheme.lightGreen, width: 1.5),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.speed, color: SnakeTheme.accentColor, size: 20),
-                        const SizedBox(width: 8),
-                        Text(
-                          'Dificuldade:',
-                          style: GoogleFonts.pressStart2p(
-                            fontSize: 10,
-                            color: SnakeTheme.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: SnakeTheme.primaryGreen.withValues(alpha: 0.3),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        difficulty,
-                        style: GoogleFonts.pressStart2p(
-                          fontSize: 10,
-                          color: SnakeTheme.accentColor,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isCompact = constraints.maxHeight < 560;
+            final radarSize = isCompact ? 105.0 : 170.0;
+
+            return SingleChildScrollView(
+              physics: const BouncingScrollPhysics(),
+              padding: EdgeInsets.symmetric(
+                horizontal: isCompact ? 14 : 20,
+                vertical: isCompact ? 8 : 16,
               ),
-
-              // Server Status Indicator
-              Consumer<SocketService>(
-                builder: (context, socket, _) {
-                  final isOnline = socket.isConnected;
-                  final isConnecting = socket.isConnecting;
-                  return Container(
-                    margin: const EdgeInsets.only(top: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: isOnline
-                          ? SnakeTheme.primaryGreen.withValues(alpha: 0.15)
-                          : (isConnecting
-                              ? const Color(0xFFFFD700).withValues(alpha: 0.15)
-                              : const Color(0xFFD32F2F).withValues(alpha: 0.15)),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: isOnline
-                            ? SnakeTheme.lightGreen
-                            : (isConnecting
-                                ? const Color(0xFFFFD700)
-                                : const Color(0xFFD32F2F)),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: isOnline
-                                ? SnakeTheme.lightGreen
-                                : (isConnecting
-                                    ? const Color(0xFFFFD700)
-                                    : const Color(0xFFEF5350)),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          isOnline
-                              ? 'Servidor Conectado • Fila Online Ativa'
-                              : (isConnecting
-                                  ? 'Conectando ao servidor...'
-                                  : 'Servidor Offline (Tentando reconectar...)'),
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: isOnline
-                                ? SnakeTheme.lightGreen
-                                : (isConnecting
-                                    ? const Color(0xFFFFD700)
-                                    : const Color(0xFFEF5350)),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-
-              const Spacer(),
-
-              // Center Content: Radar / Search vs Match Found Card
-              if (_state == LobbyState.searching) ...[
-                _buildRadarAnimation(),
-                const SizedBox(height: 24),
-                Text(
-                  'BUSCANDO OPONENTE...',
-                  style: GoogleFonts.pressStart2p(
-                    fontSize: 13,
-                    color: SnakeTheme.accentColor,
-                    letterSpacing: 1.2,
-                  ),
-                  textAlign: TextAlign.center,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: (constraints.maxHeight - (isCompact ? 16 : 32)).clamp(0.0, double.infinity),
                 ),
-                const SizedBox(height: 10),
-                Text(
-                  'Procurando jogador na dificuldade $difficulty',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: SnakeTheme.textSecondary,
-                    fontSize: 13,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: SnakeTheme.cardBackground,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: SnakeTheme.lightGreen.withValues(alpha: 0.5)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                child: IntrinsicHeight(
+                  child: Column(
                     children: [
-                      const Icon(Icons.timer_outlined, color: SnakeTheme.accentColor, size: 16),
-                      const SizedBox(width: 6),
-                      Text(
-                        'Tempo na Fila: ${_formatTime(_searchSeconds)}',
-                        style: GoogleFonts.pressStart2p(
-                          fontSize: 9,
-                          color: SnakeTheme.textPrimary,
+                      // Header: Selected Difficulty badge
+                      Container(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: isCompact ? 6 : 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: SnakeTheme.cardBackground,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: SnakeTheme.lightGreen, width: 1.5),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.speed, color: SnakeTheme.accentColor, size: 20),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Dificuldade:',
+                                  style: GoogleFonts.pressStart2p(
+                                    fontSize: 10,
+                                    color: SnakeTheme.textSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: SnakeTheme.primaryGreen.withValues(alpha: 0.3),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                difficulty,
+                                style: GoogleFonts.pressStart2p(
+                                  fontSize: 10,
+                                  color: SnakeTheme.accentColor,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
-                ),
-                if (_searchSeconds >= 10) ...[
-                  const SizedBox(height: 14),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: SnakeTheme.cardBackground,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: SnakeTheme.accentColor.withValues(alpha: 0.4)),
-                    ),
-                    child: Column(
-                      children: [
-                        const Text(
-                          'Aguardando outro jogador entrar na fila...',
-                          style: TextStyle(color: SnakeTheme.textSecondary, fontSize: 12),
+
+                      // Server Status Indicator (Always calm green and online)
+                      Container(
+                        margin: const EdgeInsets.only(top: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: SnakeTheme.primaryGreen.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: SnakeTheme.lightGreen,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: SnakeTheme.lightGreen,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Servidor Conectado • Fila Online Ativa',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: SnakeTheme.lightGreen,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      if (!isCompact) const Spacer() else const SizedBox(height: 12),
+
+                      // Center Content: Radar / Search vs Match Found Card
+                      if (_state == LobbyState.searching) ...[
+                        _buildRadarAnimation(size: radarSize),
+                        SizedBox(height: isCompact ? 10 : 20),
+                        Text(
+                          'BUSCANDO OPONENTE...',
+                          style: GoogleFonts.pressStart2p(
+                            fontSize: isCompact ? 11 : 13,
+                            color: SnakeTheme.accentColor,
+                            letterSpacing: 1.2,
+                          ),
                           textAlign: TextAlign.center,
                         ),
-                        const SizedBox(height: 4),
-                        TextButton.icon(
-                          onPressed: _startBotMatch,
-                          icon: const Icon(Icons.smart_toy_outlined, color: SnakeTheme.accentColor, size: 16),
-                          label: const Text(
-                            'Jogar contra Bot de Treino agora',
-                            style: TextStyle(
-                              color: SnakeTheme.accentColor,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
+                        const SizedBox(height: 6),
+                        Text(
+                          'Procurando jogador na dificuldade $difficulty',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: SnakeTheme.textSecondary,
+                            fontSize: isCompact ? 11 : 13,
+                          ),
+                        ),
+                        SizedBox(height: isCompact ? 8 : 14),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: SnakeTheme.cardBackground,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: SnakeTheme.lightGreen.withValues(alpha: 0.5)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.timer_outlined, color: SnakeTheme.accentColor, size: 16),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Tempo na Fila: ${_formatTime(_searchSeconds)}',
+                                style: GoogleFonts.pressStart2p(
+                                  fontSize: 9,
+                                  color: SnakeTheme.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (_searchSeconds >= 10) ...[
+                          const SizedBox(height: 10),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: SnakeTheme.cardBackground,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: SnakeTheme.accentColor.withValues(alpha: 0.4)),
+                            ),
+                            child: Column(
+                              children: [
+                                const Text(
+                                  'Aguardando outro jogador entrar na fila...',
+                                  style: TextStyle(color: SnakeTheme.textSecondary, fontSize: 12),
+                                  textAlign: TextAlign.center,
+                                ),
+                                const SizedBox(height: 4),
+                                TextButton.icon(
+                                  onPressed: _startBotMatch,
+                                  icon: const Icon(Icons.smart_toy_outlined, color: SnakeTheme.accentColor, size: 16),
+                                  label: const Text(
+                                    'Jogar contra Bot de Treino agora',
+                                    style: TextStyle(
+                                      color: SnakeTheme.accentColor,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ] else if (_state == LobbyState.matched) ...[
+                        _buildVsMatchCard(playerName, playerTrophies, difficulty),
+                      ],
+
+                      if (!isCompact) const Spacer() else const SizedBox(height: 12),
+
+                      // Player Info Card
+                      _buildPlayerInfoCard(playerName, playerTrophies),
+
+                      SizedBox(height: isCompact ? 10 : 14),
+
+                      // Action buttons (only while searching)
+                      if (_state == LobbyState.searching) ...[
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: _startBotMatch,
+                            icon: const Icon(Icons.smart_toy_rounded, color: Colors.black, size: 20),
+                            label: const Text(
+                              'JOGAR CONTRA BOT (TREINO)',
+                              style: TextStyle(
+                                color: Colors.black,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.8,
+                                fontSize: 13,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: SnakeTheme.accentColor,
+                              padding: EdgeInsets.symmetric(vertical: isCompact ? 10 : 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              final shouldCancel = await _showCancelConfirmationDialog();
+                              if (shouldCancel && mounted) {
+                                _cancelMatchmaking();
+                              }
+                            },
+                            icon: const Icon(Icons.cancel_outlined, color: Colors.white, size: 18),
+                            label: const Text(
+                              'CANCELAR BUSCA',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.8,
+                                fontSize: 13,
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              padding: EdgeInsets.symmetric(vertical: isCompact ? 8 : 12),
+                              side: const BorderSide(color: SnakeTheme.lightGreen, width: 1.5),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
                             ),
                           ),
                         ),
                       ],
-                    ),
-                  ),
-                ],
-              ] else if (_state == LobbyState.matched) ...[
-                _buildVsMatchCard(playerName, playerTrophies, difficulty),
-              ],
-
-              const Spacer(),
-
-              // Player Info Card
-              _buildPlayerInfoCard(playerName, playerTrophies),
-
-              const SizedBox(height: 14),
-
-              // Action buttons (only while searching)
-              if (_state == LobbyState.searching) ...[
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _startBotMatch,
-                    icon: const Icon(Icons.smart_toy_rounded, color: Colors.black, size: 20),
-                    label: const Text(
-                      'JOGAR CONTRA BOT (TREINO)',
-                      style: TextStyle(
-                        color: Colors.black,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.8,
-                        fontSize: 13,
-                      ),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: SnakeTheme.accentColor,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _cancelMatchmaking,
-                    icon: const Icon(Icons.cancel_outlined, color: Colors.white, size: 18),
-                    label: const Text(
-                      'CANCELAR BUSCA',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.8,
-                        fontSize: 13,
-                      ),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      side: const BorderSide(color: SnakeTheme.lightGreen, width: 1.5),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
+              ),
+            );
+          },
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
-  Widget _buildRadarAnimation() {
+  Widget _buildRadarAnimation({double size = 170.0}) {
     return AnimatedBuilder(
       animation: _radarController,
       builder: (context, child) {
+        final outerPulse = size + (_pulseController.value * (size * 0.15));
+        final middleCircle = size * 0.75;
+        final iconBoxSize = size * 0.35;
+        final iconSize = size * 0.18;
+
         return Stack(
           alignment: Alignment.center,
           children: [
-            // Outer pulse circle 1
+            // Outer pulse circle
             Container(
-              width: 190 + (_pulseController.value * 25),
-              height: 190 + (_pulseController.value * 25),
+              width: outerPulse,
+              height: outerPulse,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: SnakeTheme.accentColor.withValues(alpha: 0.25 - (_pulseController.value * 0.15)),
+                  color: SnakeTheme.accentColor.withValues(
+                    alpha: (0.25 - (_pulseController.value * 0.15)).clamp(0.0, 1.0),
+                  ),
                   width: 2,
                 ),
               ),
             ),
             // Middle circle
             Container(
-              width: 140,
-              height: 140,
+              width: middleCircle,
+              height: middleCircle,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
@@ -551,13 +719,13 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
             ),
             // Radar sweeping line canvas
             CustomPaint(
-              size: const Size(140, 140),
+              size: Size(middleCircle, middleCircle),
               painter: _RadarPainter(rotation: _radarController.value * 2 * math.pi),
             ),
             // Center glowing icon
             Container(
-              width: 64,
-              height: 64,
+              width: iconBoxSize,
+              height: iconBoxSize,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: SnakeTheme.darkGreen,
@@ -565,15 +733,15 @@ class _MultiplayerLobbyScreenState extends State<MultiplayerLobbyScreen>
                 boxShadow: [
                   BoxShadow(
                     color: SnakeTheme.accentColor.withValues(alpha: 0.4),
-                    blurRadius: 16,
+                    blurRadius: 14,
                     spreadRadius: 2,
                   ),
                 ],
               ),
-              child: const Icon(
+              child: Icon(
                 Icons.public,
                 color: SnakeTheme.accentColor,
-                size: 32,
+                size: iconSize.clamp(16.0, 32.0),
               ),
             ),
           ],

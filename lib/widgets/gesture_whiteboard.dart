@@ -129,42 +129,48 @@ class _GestureWhiteboardState extends State<GestureWhiteboard> {
               // Whiteboard instructions & watermark
               Center(
                 child: IgnorePointer(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: SnakeTheme.primaryGreen.withOpacity(0.08),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.touch_app_outlined,
-                          size: 28,
-                          color: SnakeTheme.darkGreen,
-                        ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: SnakeTheme.primaryGreen.withValues(alpha: 0.08),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.touch_app_outlined,
+                              size: 24,
+                              color: SnakeTheme.darkGreen,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'LOUSA DE CONTROLE',
+                            style: TextStyle(
+                              color: Color(0xFF1B5E20),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          const Text(
+                            'Arraste o dedo para guiar a cobra',
+                            style: TextStyle(
+                              color: Color(0xFF556B2F),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 6),
-                      const Text(
-                        'LOUSA DE CONTROLE',
-                        style: TextStyle(
-                          color: Color(0xFF1B5E20),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          letterSpacing: 1.5,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      const Text(
-                        'Arraste o dedo nesta área para guiar a cobra',
-                        style: TextStyle(
-                          color: Color(0xFF556B2F),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               ),
@@ -268,7 +274,7 @@ class _TouchTrailPainter extends CustomPainter {
       final progress = (i + 1) / points.length;
       final paint = Paint()
         ..color = Color.lerp(
-          Colors.teal.withOpacity(0.3),
+          Colors.teal.withValues(alpha: 0.3),
           const Color(0xFF1B5E20),
           progress,
         )!

@@ -15,6 +15,10 @@ class SocketService extends ChangeNotifier {
   String? _error;
   String? _gameId;
   User? _currentUser;
+  bool _isSearchingMatch = false;
+  String? _searchDifficulty;
+  User? _searchUser;
+  Map<String, dynamic>? _lastActiveMatch;
   
   // Game state callbacks
   Function(GameState)? onGameStateUpdate;
@@ -31,25 +35,29 @@ class SocketService extends ChangeNotifier {
   // Getters
   bool get isConnected => _isConnected;
   bool get isConnecting => _isConnecting;
+  bool get isSearchingMatch => _isSearchingMatch;
   String? get error => _error;
   String? get gameId => _gameId;
+  Map<String, dynamic>? get lastActiveMatch => _lastActiveMatch;
   
   // Initialize socket connection
   Future<void> connect({String? serverUrl, User? user}) async {
-    if (_isConnecting || _isConnected) return;
+    if (user != null) _currentUser = user;
+    if (_isConnected) return;
+    if (_socket != null && _isConnecting) return;
     
     _isConnecting = true;
-    _currentUser = user;
     _clearError();
     notifyListeners();
     
     try {
+      _socket?.dispose();
       _socket = io.io(
         serverUrl ?? defaultServerUrl,
         io.OptionBuilder()
             .setTransports(['websocket'])
             .enableReconnection()
-            .setReconnectionAttempts(5)
+            .setReconnectionAttempts(10)
             .setReconnectionDelay(1000)
             .setAuth({'token': gameSecretToken})
             .setExtraHeaders({'x-game-token': gameSecretToken})
@@ -72,6 +80,7 @@ class SocketService extends ChangeNotifier {
   
   // Disconnect from socket
   void disconnect() {
+    _isSearchingMatch = false;
     _socket?.disconnect();
     _socket?.dispose();
     _socket = null;
@@ -92,7 +101,25 @@ class SocketService extends ChangeNotifier {
       _isConnecting = false;
       _clearError();
       notifyListeners();
-      debugPrint('Socket connected');
+      debugPrint('Socket connected: ${_socket?.id}');
+
+      if (_currentUser != null) {
+        _socket!.emit('authenticate', _currentUser!.toJson());
+      }
+
+      // If matchmaking was requested, auto-emit find_match upon connection!
+      if (_isSearchingMatch && _searchDifficulty != null) {
+        _socket!.emit('find_match', {
+          'difficulty': _searchDifficulty,
+          'user': (_searchUser ?? _currentUser)?.toJson(),
+        });
+        debugPrint('find_match auto-emitted on connect: $_searchDifficulty');
+      }
+
+      // If active game existed, reconnect
+      if (_gameId != null) {
+        _socket!.emit('reconnect_game', {'gameId': _gameId});
+      }
     });
     
     _socket!.onDisconnect((_) {
@@ -116,7 +143,9 @@ class SocketService extends ChangeNotifier {
     
     // Game events
     _socket!.on('match_found', (data) {
+      _isSearchingMatch = false;
       if (data is Map) {
+        _lastActiveMatch = Map<String, dynamic>.from(data);
         _gameId = data['gameId']?.toString();
         onRealMatchFound?.call(Map<String, dynamic>.from(data));
       }
@@ -161,18 +190,36 @@ class SocketService extends ChangeNotifier {
       final gameResult = GameResult_.fromJson(data);
       onGameEnd?.call(gameResult);
       _gameId = null;
+      _lastActiveMatch = null;
     });
     
     _socket!.on('matchmaking_canceled', (_) {
+      _lastActiveMatch = null;
       onMatchmakingCanceled?.call();
     });
     
     // Reconnection events
     _socket!.onReconnect((_) {
-      debugPrint('Socket reconnected');
-      // Re-authenticate on reconnection
+      _isConnected = true;
+      _isConnecting = false;
+      _clearError();
+      notifyListeners();
+      debugPrint('Socket reconnected: ${_socket?.id}');
+
       if (_currentUser != null) {
         _socket!.emit('authenticate', _currentUser!.toJson());
+      }
+
+      if (_isSearchingMatch && _searchDifficulty != null) {
+        _socket!.emit('find_match', {
+          'difficulty': _searchDifficulty,
+          'user': (_searchUser ?? _currentUser)?.toJson(),
+        });
+        debugPrint('find_match auto-emitted on reconnect: $_searchDifficulty');
+      }
+
+      if (_gameId != null) {
+        _socket!.emit('reconnect_game', {'gameId': _gameId});
       }
     });
   }
@@ -190,11 +237,61 @@ class SocketService extends ChangeNotifier {
   }
 
   Future<void> findRealMatch({required String difficulty, User? user}) async {
-    if (!_isConnected || _socket == null) return;
-    _socket!.emit('find_match', {
-      'difficulty': difficulty,
-      'user': (user ?? _currentUser)?.toJson(),
-    });
+    _isSearchingMatch = true;
+    _searchDifficulty = difficulty;
+    if (user != null) _currentUser = user;
+    _searchUser = user ?? _currentUser;
+
+    if (_isConnected && _socket != null) {
+      _socket!.emit('find_match', {
+        'difficulty': difficulty,
+        'user': _searchUser?.toJson(),
+      });
+      debugPrint('find_match emitted to server: difficulty=$difficulty, user=${_searchUser?.name}');
+    } else {
+      debugPrint('find_match queued: waiting for socket connection...');
+    }
+  }
+
+  /// Check if this user already has an active ongoing match on the server (e.g. after resuming from background)
+  Future<Map<String, dynamic>?> checkActiveMatch({User? user}) async {
+    if (user != null) _currentUser = user;
+    if (!_isConnected || _socket == null) return _lastActiveMatch;
+
+    final completer = Completer<Map<String, dynamic>?>();
+    try {
+      _socket!.emitWithAck('check_active_match', {
+        'user': (_currentUser ?? user)?.toJson(),
+      }, ack: (response) {
+        if (response is Map && response['active'] == true && response['match'] is Map) {
+          final matchData = Map<String, dynamic>.from(response['match']);
+          _lastActiveMatch = matchData;
+          _gameId = matchData['gameId']?.toString();
+          _isSearchingMatch = false;
+          onRealMatchFound?.call(matchData);
+          onMatchFound?.call(_gameId ?? '');
+          notifyListeners();
+          if (!completer.isCompleted) {
+            completer.complete(matchData);
+          }
+        } else {
+          if (!completer.isCompleted) {
+            completer.complete(null);
+          }
+        }
+      });
+      return await completer.future.timeout(const Duration(seconds: 3));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Reconnect to an active game room
+  void reconnectGame(String gId) {
+    _gameId = gId;
+    if (_isConnected && _socket != null) {
+      _socket!.emit('reconnect_game', {'gameId': gId});
+    }
   }
 
   void sendAppleEaten({required int apples, required int length, required int score}) {
@@ -212,8 +309,11 @@ class SocketService extends ChangeNotifier {
   }
   
   Future<void> cancelMatchmaking() async {
-    if (!_isConnected) return;
-    
+    _isSearchingMatch = false;
+    _searchDifficulty = null;
+    _searchUser = null;
+    _lastActiveMatch = null;
+    if (!_isConnected || _socket == null) return;
     _socket!.emit('cancel_matchmaking');
   }
   
@@ -241,9 +341,11 @@ class SocketService extends ChangeNotifier {
   }
   
   Future<void> leaveGame() async {
-    if (!_isConnected || _gameId == null) return;
-    
-    _socket!.emit('leave_game', {'gameId': _gameId});
+    _isSearchingMatch = false;
+    _lastActiveMatch = null;
+    if (_isConnected && _socket != null && _gameId != null) {
+      _socket!.emit('leave_game', {'gameId': _gameId});
+    }
     _gameId = null;
   }
   
@@ -315,6 +417,52 @@ class SocketService extends ChangeNotifier {
     disconnect();
     await Future.delayed(const Duration(milliseconds: 500));
     await connect(user: _currentUser);
+  }
+
+  /// Ensure socket is actually connected at the native level.
+  /// When Android suspends the Dart isolate (app backgrounded), the socket
+  /// may disconnect but our cached [_isConnected] stays true because
+  /// [onDisconnect] never ran. This method detects that stale state and
+  /// forces a fresh connection while preserving matchmaking state.
+  Future<void> ensureHealthyConnection({String? serverUrl, User? user}) async {
+    if (user != null) _currentUser = user;
+
+    // Check the ACTUAL native socket state, not our cached _isConnected
+    if (_socket != null && _socket!.connected) {
+      // Socket is truly alive — re-emit authenticate so the server can
+      // catch us up to any match created while we were backgrounded
+      if (_currentUser != null) {
+        _socket!.emit('authenticate', _currentUser!.toJson());
+      }
+      debugPrint('ensureHealthyConnection: socket is alive, re-authenticated');
+      return;
+    }
+
+    // Socket is dead/stale — save matchmaking state before teardown
+    debugPrint('ensureHealthyConnection: socket is DEAD, forcing fresh connection');
+    final wasSearching = _isSearchingMatch;
+    final savedDifficulty = _searchDifficulty;
+    final savedUser = _searchUser;
+    final savedGameId = _gameId;
+    final savedMatch = _lastActiveMatch;
+
+    // Tear down the dead socket without going through disconnect()
+    // (disconnect() clears search state which we need to preserve)
+    _socket?.dispose();
+    _socket = null;
+    _isConnected = false;
+    _isConnecting = false;
+
+    // Restore search state so onConnect auto-emits find_match
+    _isSearchingMatch = wasSearching;
+    _searchDifficulty = savedDifficulty;
+    _searchUser = savedUser;
+    _gameId = savedGameId;
+    _lastActiveMatch = savedMatch;
+
+    // Create fresh connection — onConnect handler will auto-emit
+    // authenticate + find_match, triggering server-side catch-up
+    await connect(serverUrl: serverUrl, user: _currentUser);
   }
 }
 

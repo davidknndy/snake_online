@@ -4,9 +4,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:snake_online/services/settings_service.dart';
 import 'package:snake_online/models/snake_model.dart';
 import 'package:snake_online/models/game_state.dart';
+import 'package:snake_online/models/user_model.dart';
 import 'package:snake_online/services/leaderboard_service.dart';
+import 'package:snake_online/services/socket_service.dart';
+import 'package:snake_online/services/auth_service.dart';
+import 'package:snake_online/widgets/game_board.dart';
 import 'package:snake_online/widgets/gesture_whiteboard.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:provider/provider.dart';
+import 'package:snake_online/screens/multiplayer_lobby_screen.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -235,7 +241,7 @@ void main() {
       );
 
       expect(find.text('LOUSA DE CONTROLE'), findsOneWidget);
-      expect(find.text('Arraste o dedo nesta área para guiar a cobra'), findsOneWidget);
+      expect(find.text('Arraste o dedo para guiar a cobra'), findsOneWidget);
 
       // Perform swipe right
       await tester.drag(find.byType(GestureWhiteboard), const Offset(50, 0));
@@ -502,6 +508,227 @@ void main() {
       expect(fromJson.foods[2], equals(const Position(15, 15)));
       expect(fromJson.matchSeed, equals(987654));
     });
+
+    test('SocketService queues search intent and updates isSearchingMatch', () {
+      final socketService = SocketService();
+      expect(socketService.isSearchingMatch, isFalse);
+
+      socketService.findRealMatch(difficulty: 'Normal');
+      expect(socketService.isSearchingMatch, isTrue);
+
+      socketService.cancelMatchmaking();
+      expect(socketService.isSearchingMatch, isFalse);
+    });
+
+    testWidgets('Landscape layout places whiteboard controls to the right of the game board', (tester) async {
+      // Set landscape screen dimensions
+      tester.view.physicalSize = const Size(1280, 720);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final gameState = GameState.initial(mode: GameMode.local);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Row(
+              children: [
+                Expanded(
+                  flex: 62,
+                  child: GameBoard(
+                    gameState: gameState,
+                    animationProgress: 0.0,
+                    onDirectionChange: (_) {},
+                  ),
+                ),
+                Expanded(
+                  flex: 38,
+                  child: GestureWhiteboard(
+                    onDirectionChange: (_) {},
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Verify GameBoard and controls are both present
+      expect(find.byType(GameBoard), findsOneWidget);
+      expect(find.byType(GestureWhiteboard), findsOneWidget);
+
+      // Verify side-by-side positioning: GameBoard on left, GestureWhiteboard on right
+      final boardTopLeft = tester.getTopLeft(find.byType(GameBoard));
+      final whiteboardTopLeft = tester.getTopLeft(find.byType(GestureWhiteboard));
+
+      expect(whiteboardTopLeft.dx, greaterThan(boardTopLeft.dx),
+          reason: 'Controls/Whiteboard should be positioned to the right of the GameBoard in landscape mode');
+    });
   });
+
+  group('AuthService Session Persistence & Google Login Tests', () {
+    test('Unauthenticated user starts with isAuthenticated = false', () async {
+      SharedPreferences.setMockInitialValues({});
+      final authService = AuthService();
+      await authService.initialize();
+
+      expect(authService.isAuthenticated, isFalse);
+      expect(authService.currentUser, isNull);
+    });
+
+    test('Reopening app restores previously logged in Google account from SharedPreferences', () async {
+      SharedPreferences.setMockInitialValues({
+        'auth_is_logged_in': true,
+        'auth_user_id': 'google_user_123',
+        'auth_user_name': 'David Kennedy',
+        'auth_user_email': 'david@example.com',
+        'auth_user_photo': 'https://example.com/photo.jpg',
+        'auth_user_trophies': 42,
+        'auth_user_games_played': 10,
+        'auth_user_games_won': 7,
+      });
+
+      final authService = AuthService();
+      await authService.initialize();
+
+      expect(authService.isAuthenticated, isTrue);
+      expect(authService.currentUser, isNotNull);
+      expect(authService.currentUser!.id, equals('google_user_123'));
+      expect(authService.currentUser!.name, equals('David Kennedy'));
+      expect(authService.currentUser!.email, equals('david@example.com'));
+      expect(authService.currentUser!.trophies, equals(42));
+    });
+
+    test('Sign out clears saved user session and marks isAuthenticated = false', () async {
+      SharedPreferences.setMockInitialValues({
+        'auth_is_logged_in': true,
+        'auth_user_id': 'google_user_123',
+        'auth_user_name': 'David Kennedy',
+      });
+
+      final authService = AuthService();
+      await authService.initialize();
+      expect(authService.isAuthenticated, isTrue);
+
+      await authService.signOut();
+
+      expect(authService.isAuthenticated, isFalse);
+      expect(authService.currentUser, isNull);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('auth_is_logged_in'), isFalse);
+      expect(prefs.getString('auth_user_id'), isNull);
+    });
+  });
+
+  group('Lobby Screen, Server Status Banner & Dual Mode Recovery Tests', () {
+    test('SocketService caches and clears lastActiveMatch correctly', () async {
+      final socket = SocketService();
+      expect(socket.lastActiveMatch, isNull);
+
+      // checkActiveMatch when offline returns null or existing cached match
+      final match = await socket.checkActiveMatch();
+      expect(match, isNull);
+
+      // cancelMatchmaking clears state
+      await socket.cancelMatchmaking();
+      expect(socket.isSearchingMatch, isFalse);
+      expect(socket.lastActiveMatch, isNull);
+    });
+
+    testWidgets('MultiplayerLobbyScreen displays stable Servidor Conectado status banner', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsService();
+      final socket = _MockSocketService();
+      final auth = AuthService();
+
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<SocketService>.value(value: socket),
+            ChangeNotifierProvider.value(value: settings),
+            ChangeNotifierProvider.value(value: auth),
+          ],
+          child: const MaterialApp(
+            home: MultiplayerLobbyScreen(),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      // Banner must be calm green "Servidor Conectado • Fila Online Ativa" and never "Conectando ao servidor..."
+      expect(find.text('Servidor Conectado • Fila Online Ativa'), findsOneWidget);
+      expect(find.text('Conectando ao servidor...'), findsNothing);
+      expect(find.text('Servidor Offline (Tentando reconectar...)'), findsNothing);
+
+      // Clean up lobby
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+
+    testWidgets('MultiplayerLobbyScreen prompts confirmation modal on cancel action', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsService();
+      final socket = _MockSocketService();
+      final auth = AuthService();
+
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<SocketService>.value(value: socket),
+            ChangeNotifierProvider.value(value: settings),
+            ChangeNotifierProvider.value(value: auth),
+          ],
+          child: const MaterialApp(
+            home: MultiplayerLobbyScreen(),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      // Find the close button in the AppBar
+      final closeButton = find.byIcon(Icons.close);
+      expect(closeButton, findsOneWidget);
+
+      // Tap close button
+      await tester.tap(closeButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // Modal dialog must be displayed
+      expect(find.text('Cancelar Busca?'), findsOneWidget);
+      expect(find.text('Continuar na Fila'), findsOneWidget);
+      expect(find.text('Sim, Cancelar'), findsOneWidget);
+
+      // Tapping "Continuar na Fila" dismisses the modal and stays in lobby
+      await tester.tap(find.text('Continuar na Fila'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('BUSCANDO OPONENTE...'), findsOneWidget);
+
+      // Clean up lobby
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+  });
+}
+
+class _MockSocketService extends SocketService {
+  @override
+  Future<void> connect({String? serverUrl, User? user}) async {
+    // No-op to prevent real network socket creation and timers in widget tests
+  }
+
+  @override
+  Future<void> findRealMatch({required String difficulty, User? user}) async {
+    // No-op
+  }
 }
 

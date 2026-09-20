@@ -99,6 +99,9 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
 
     if (widget.isRealMatch) {
       final socketService = Provider.of<SocketService>(context, listen: false);
+      if (socketService.gameId != null) {
+        socketService.reconnectGame(socketService.gameId!);
+      }
       socketService.onOpponentAppleEaten = (data) {
         if (!mounted || _gameState.status != GameStatus.playing) return;
         setState(() {
@@ -946,56 +949,116 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
                   // Dual Score & Timer HUD (~10%)
                   _buildDualHeader(),
 
-                  // Game board area (~60%)
-                  Expanded(
-                    flex: 6,
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: SnakeTheme.lightGreen, width: 3),
-                        borderRadius: BorderRadius.circular(8),
+                  // Main Play Area: Landscape (Row with board left, controls right) vs Portrait (Column)
+                  if (MediaQuery.of(context).orientation == Orientation.landscape)
+                    Expanded(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          // Game board on the left (62% of width)
+                          Expanded(
+                            flex: 62,
+                            child: Container(
+                              margin: const EdgeInsets.fromLTRB(8, 4, 4, 4),
+                              decoration: BoxDecoration(
+                                border: Border.all(color: SnakeTheme.lightGreen, width: 3),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(5),
+                                child: GameBoard(
+                                  gameState: _gameState,
+                                  animationProgress: _moveController.value,
+                                  onDirectionChange: _onDirectionChange,
+                                ),
+                              ),
+                            ),
+                          ),
+                          // Game controls / Whiteboard on the right (38% of width)
+                          Consumer<SettingsService>(
+                            builder: (context, settings, _) {
+                              return Expanded(
+                                flex: 38,
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(4, 4, 8, 4),
+                                  child: settings.controlType == ControlType.buttons
+                                      ? Center(
+                                          child: SingleChildScrollView(
+                                            physics: const NeverScrollableScrollPhysics(),
+                                            child: Padding(
+                                              padding: const EdgeInsets.symmetric(vertical: 2),
+                                              child: GameControls(
+                                                onDirectionChange: _onDirectionChange,
+                                                isEnabled: !_isIntroActive &&
+                                                    _gameState.status == GameStatus.playing,
+                                              ),
+                                            ),
+                                          ),
+                                        )
+                                      : GestureWhiteboard(
+                                          onDirectionChange: _onDirectionChange,
+                                          isEnabled: !_isIntroActive &&
+                                              _gameState.status == GameStatus.playing,
+                                        ),
+                                ),
+                              );
+                            },
+                          ),
+                        ],
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(5),
-                        child: GameBoard(
-                          gameState: _gameState,
-                          animationProgress: _moveController.value,
-                          onDirectionChange: _onDirectionChange,
+                    )
+                  else ...[
+                    // Portrait: Game board area (~60%)
+                    Expanded(
+                      flex: 6,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: SnakeTheme.lightGreen, width: 3),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(5),
+                          child: GameBoard(
+                            gameState: _gameState,
+                            animationProgress: _moveController.value,
+                            onDirectionChange: _onDirectionChange,
+                          ),
                         ),
                       ),
                     ),
-                  ),
 
-                  // Control area (~30%)
-                  Consumer<SettingsService>(
-                    builder: (context, settings, _) {
-                      return Expanded(
-                        flex: 3,
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 2.0),
-                          child: settings.controlType == ControlType.buttons
-                              ? Center(
-                                  child: SingleChildScrollView(
-                                    physics: const NeverScrollableScrollPhysics(),
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(vertical: 2),
-                                      child: GameControls(
-                                        onDirectionChange: _onDirectionChange,
-                                        isEnabled: !_isIntroActive &&
-                                            _gameState.status == GameStatus.playing,
+                    // Control area (~30%)
+                    Consumer<SettingsService>(
+                      builder: (context, settings, _) {
+                        return Expanded(
+                          flex: 3,
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 2.0),
+                            child: settings.controlType == ControlType.buttons
+                                ? Center(
+                                    child: SingleChildScrollView(
+                                      physics: const NeverScrollableScrollPhysics(),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 2),
+                                        child: GameControls(
+                                          onDirectionChange: _onDirectionChange,
+                                          isEnabled: !_isIntroActive &&
+                                              _gameState.status == GameStatus.playing,
+                                        ),
                                       ),
                                     ),
+                                  )
+                                : GestureWhiteboard(
+                                    onDirectionChange: _onDirectionChange,
+                                    isEnabled: !_isIntroActive &&
+                                        _gameState.status == GameStatus.playing,
                                   ),
-                                )
-                              : GestureWhiteboard(
-                                  onDirectionChange: _onDirectionChange,
-                                  isEnabled: !_isIntroActive &&
-                                      _gameState.status == GameStatus.playing,
-                                ),
-                        ),
-                      );
-                    },
-                  ),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ],
               ),
 
