@@ -467,9 +467,10 @@ class _LocalGameScreenState extends State<LocalGameScreen>
           ),
           textAlign: TextAlign.center,
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
             if (reachedOvertime) ...[
               Container(
                 margin: const EdgeInsets.only(bottom: 12),
@@ -570,7 +571,8 @@ class _LocalGameScreenState extends State<LocalGameScreen>
                 ),
               ),
             ],
-          ],
+            ],
+          ),
         ),
         actions: [
           // Menu Button - Improved visibility

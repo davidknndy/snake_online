@@ -35,7 +35,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen>
 
     leaderboardService.fetchWorldwideLeaderboard(
       currentPlayerName: authService.currentUser?.name,
-      trophies: settingsService.trophies,
+      trophies: authService.currentUser?.trophies ?? settingsService.trophies,
       highScore: settingsService.highScore,
       serverUrl: settingsService.serverUrl,
     );

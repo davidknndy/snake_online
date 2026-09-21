@@ -338,7 +338,7 @@ class LeaderboardService extends ChangeNotifier {
             },
             body: json.encode({
               'playerName': cleanName,
-              'score': bestScore,
+              'score': 0, // ONLY send 0 here so we don't overwrite multiplayer high scores with local mode scores
               'trophies': currentTrophies,
             }),
           ).timeout(const Duration(seconds: 4));
@@ -439,9 +439,8 @@ class LeaderboardService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Submit score to worldwide leaderboard
-  Future<void> submitWorldwideScore(String playerName, int score, int trophies, {String? serverUrl}) async {
-    await addLocalScore(playerName, score, trophies);
+  // Submit score to worldwide leaderboard explicitly (for multiplayer only)
+  Future<void> submitMultiplayerScoreToServer(String playerName, int score, int trophies, {String? serverUrl}) async {
     try {
       final targetUrl = serverUrl ?? SocketService.defaultServerUrl;
       final uri = Uri.parse('$targetUrl/api/leaderboard');
@@ -458,8 +457,14 @@ class LeaderboardService extends ChangeNotifier {
         }),
       ).timeout(const Duration(seconds: 4));
     } catch (e) {
-      debugPrint('Error submitting score to server: $e');
+      debugPrint('Error submitting multiplayer score to server: $e');
     }
+  }
+
+  // Submit score to worldwide leaderboard AND local
+  Future<void> submitWorldwideScore(String playerName, int score, int trophies, {String? serverUrl}) async {
+    await addLocalScore(playerName, score, trophies);
+    await submitMultiplayerScoreToServer(playerName, score, trophies, serverUrl: serverUrl);
   }
 }
 

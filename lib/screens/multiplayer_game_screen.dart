@@ -618,6 +618,12 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
         _gameState.playerScore,
         isDraw: isDraw,
       );
+      // Immediately push this true multiplayer score and the newly computed trophies to the Mundial server
+      leaderboardService.submitMultiplayerScoreToServer(
+        authService.currentUser!.name,
+        _gameState.playerScore,
+        authService.currentUser!.trophies,
+      );
     } else {
       leaderboardService.addLocalScore(
         widget.playerName,
@@ -672,9 +678,10 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
           ),
           textAlign: TextAlign.center,
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
             Text(
               headline,
               textAlign: TextAlign.center,
@@ -734,7 +741,8 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
                 ],
               ),
             ),
-          ],
+            ],
+          ),
         ),
         actions: [
           ElevatedButton(

@@ -205,10 +205,11 @@ class SnakeGamePainter extends CustomPainter {
 
     // 3. Draw head at segmentCenters[0]
     final headCenter = segmentCenters.first;
+    final double headSize = min(cellWidth, cellHeight) - 2;
     final headRect = Rect.fromCenter(
       center: headCenter,
-      width: cellWidth - 2,
-      height: cellHeight - 2,
+      width: headSize,
+      height: headSize,
     );
     final headPaint = Paint()
       ..color = SnakeTheme.lightGreen
@@ -228,7 +229,9 @@ class SnakeGamePainter extends CustomPainter {
       ..color = SnakeTheme.background
       ..style = PaintingStyle.fill;
 
-    final double eyeSize = headRect.width * 0.15;
+    // Use minimum dimension for eye calculations to ensure circular eyes
+    final double minDim = min(headRect.width, headRect.height);
+    final double eyeSize = minDim * 0.15;
     final double eyeOffsetX = headRect.width * 0.25;
     final double eyeOffsetY = headRect.height * 0.25;
 

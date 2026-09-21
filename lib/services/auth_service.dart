@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/user_model.dart' as app_models;
@@ -80,6 +81,44 @@ class AuthService extends ChangeNotifier {
     _setLoading(false);
   }
 
+  Future<void> _syncWithFirestore(app_models.User localUser) async {
+    try {
+      final docRef = FirebaseFirestore.instance.collection('users').doc(localUser.id);
+      final docSnap = await docRef.get();
+
+      if (docSnap.exists) {
+        // User exists in Firestore, load their remote stats
+        final data = docSnap.data()!;
+        _currentUser = localUser.copyWith(
+          trophies: data['trophies'] ?? localUser.trophies,
+          gamesPlayed: data['gamesPlayed'] ?? localUser.gamesPlayed,
+          gamesWon: data['gamesWon'] ?? localUser.gamesWon,
+        );
+      } else {
+        // New user in Firestore, save their local stats (if any) to remote
+        await docRef.set({
+          'name': localUser.name,
+          'email': localUser.email,
+          'photoUrl': localUser.photoUrl,
+          'trophies': localUser.trophies,
+          'gamesPlayed': localUser.gamesPlayed,
+          'gamesWon': localUser.gamesWon,
+          'createdAt': FieldValue.serverTimestamp(),
+          'lastSeen': FieldValue.serverTimestamp(),
+        });
+        _currentUser = localUser;
+      }
+    } catch (e) {
+      debugPrint('Firestore sync error: $e');
+      _currentUser = localUser; // Fallback to local
+    }
+    
+    if (_currentUser != null) {
+      await _saveUserToPrefs(_currentUser!);
+      notifyListeners();
+    }
+  }
+
   // Sign in with Google
   // [forceAccountChooser]: forces Google to display the account picker modal
   Future<bool> signInWithGoogle({bool forceAccountChooser = false}) async {
@@ -119,10 +158,20 @@ class AuthService extends ChangeNotifier {
               await fb.signInWithCredential(credential);
 
           if (userCredential.user != null) {
-            _updateCurrentUser(userCredential.user!);
-            if (_currentUser != null) {
-              await _saveUserToPrefs(_currentUser!);
-            }
+            final fUser = userCredential.user!;
+            final tempUser = app_models.User(
+              id: fUser.uid,
+              name: fUser.displayName ?? 'Jogador',
+              email: fUser.email ?? '',
+              photoUrl: fUser.photoURL,
+              trophies: localTrophies,
+              gamesPlayed: 0,
+              gamesWon: 0,
+              createdAt: DateTime.now(),
+              lastSeen: DateTime.now(),
+            );
+            
+            await _syncWithFirestore(tempUser);
             _setLoading(false);
             return true;
           }
@@ -131,7 +180,7 @@ class AuthService extends ChangeNotifier {
         }
       }
 
-      // Fallback directly to GoogleSignInAccount profile
+      // Fallback directly to GoogleSignInAccount profile (if Firebase fails)
       _currentUser = app_models.User(
         id: googleUser.id,
         name: googleUser.displayName ?? 'Jogador',
@@ -197,6 +246,19 @@ class AuthService extends ChangeNotifier {
 
       _currentUser = updatedUser;
       await _saveUserToPrefs(updatedUser);
+      
+      // Update Firestore
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(updatedUser.id).update({
+          'trophies': updatedUser.trophies,
+          'gamesPlayed': updatedUser.gamesPlayed,
+          'gamesWon': updatedUser.gamesWon,
+          'lastSeen': FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        debugPrint('Error updating Firestore stats: $e');
+      }
+
       notifyListeners();
     } catch (e) {
       _setError('Failed to update user stats: ${e.toString()}');
@@ -214,27 +276,41 @@ class AuthService extends ChangeNotifier {
         lastSeen: DateTime.now(),
       );
       await _saveUserToPrefs(_currentUser!);
+      
+      // Update Firestore
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(_currentUser!.id).update({
+          'trophies': 0,
+          'gamesPlayed': 0,
+          'gamesWon': 0,
+          'lastSeen': FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        debugPrint('Error resetting Firestore stats: $e');
+      }
+
       notifyListeners();
     } catch (e) {
       _setError('Failed to reset user stats: ${e.toString()}');
     }
   }
 
-  // Convert Firebase user to app user model
+  // Convert Firebase user to app user model (used during auth state changes)
   void _updateCurrentUser(firebase_auth.User firebaseUser) {
-    final previousTrophies = _currentUser?.trophies ?? 0;
-    _currentUser = app_models.User(
+    final tempUser = app_models.User(
       id: firebaseUser.uid,
       name: firebaseUser.displayName ?? 'Jogador',
       email: firebaseUser.email ?? '',
       photoUrl: firebaseUser.photoURL,
-      trophies: previousTrophies,
+      trophies: _currentUser?.trophies ?? 0,
       gamesPlayed: _currentUser?.gamesPlayed ?? 0,
       gamesWon: _currentUser?.gamesWon ?? 0,
       createdAt: firebaseUser.metadata.creationTime ?? DateTime.now(),
       lastSeen: DateTime.now(),
     );
-    notifyListeners();
+    
+    // Fire and forget sync to ensure we get the latest from Firestore on app startup
+    _syncWithFirestore(tempUser);
   }
 
   // Save user credentials to local SharedPreferences
