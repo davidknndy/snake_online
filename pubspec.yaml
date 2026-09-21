@@ -64,6 +64,7 @@ dependencies:
   flutter_animate: ^4.5.0
   package_info_plus: ^9.0.1
   google_fonts: ^8.1.0
+  lottie: ^3.3.3
 
 dev_dependencies:
   flutter_test:
@@ -88,6 +89,7 @@ flutter:
     - assets/images/
     - assets/sounds/
     - assets/icons/
+    - assets/loadinglot.json
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

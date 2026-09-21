@@ -80,6 +80,9 @@ class _MultiplayerGameScreenState extends State<MultiplayerGameScreen>
       vsync: this,
       duration: Duration(milliseconds: initialDuration),
     );
+    _moveController.addListener(() {
+      setState(() {});
+    });
 
     _countdownAnimController = AnimationController(
       vsync: this,
