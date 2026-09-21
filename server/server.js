@@ -118,7 +118,8 @@ function findActiveGameForUser(user) {
       if (Array.isArray(game.playerData)) {
         for (const p of game.playerData) {
           const matchesId = user.id && p.user && p.user.id && (p.user.id === user.id);
-          if (matchesId) {
+          const matchesName = user.name && p.user && p.user.name && (p.user.name === user.name);
+          if (matchesId && matchesName) {
             console.log(`[findActiveGame] Partida encontrada para ${user.name} (id=${user.id}): gameId=${gameId}, age=${Math.round(age/1000)}s`);
             return { game, myPlayerData: p };
           }
@@ -137,20 +138,7 @@ function removeFromAllQueues(socketId) {
   }
 }
 
-// Helper to remove a user from all queues by user identity (ID)
-function removeUserFromAllQueues(user) {
-  if (!user) return;
-  for (const diff of Object.keys(queues)) {
-    const before = queues[diff].length;
-    queues[diff] = queues[diff].filter((item) => {
-      const matchesId = user.id && item.user && item.user.id && (item.user.id === user.id);
-      return !matchesId;
-    });
-    if (queues[diff].length < before) {
-      console.log(`[Fila] Removido jogador antigo ${user.name} da fila ${diff} (limpeza por identidade)`);
-    }
-  }
-}
+// Helper function removed because we now rely on socket.id
 
 // Clean up disconnected queue entries older than 45s
 setInterval(() => {
@@ -183,9 +171,6 @@ io.on('connection', (socket) => {
         trophies: userData.trophies || 0,
       };
       console.log(`[Auth] Jogador autenticado: ${socket.user.name} (id=${socket.user.id}, ${socket.user.trophies} troféus)`);
-
-      // Clean up stale queue entries for this user from old/disconnected sockets
-      removeUserFromAllQueues(socket.user);
 
       // Check if user has active ongoing match created while app was backgrounded
       const activeMatchInfo = findActiveGameForUser(socket.user);
@@ -278,9 +263,6 @@ io.on('connection', (socket) => {
       };
     }
 
-    // Also remove any stale queue entries for this user from previous sockets
-    removeUserFromAllQueues(socket.user);
-
     // If authenticate already reconnected this socket to an active game, skip
     if (socket.gameId && activeGames.has(socket.gameId)) {
       console.log(`[Fila] ${socket.user.name} já está na partida ${socket.gameId} (via authenticate). Ignorando find_match.`);
@@ -329,7 +311,11 @@ io.on('connection', (socket) => {
     let selectedDiff = difficulty;
 
     // 1. Check exact difficulty queue
-    const oppIndex = queue.findIndex(item => item.socket.id !== socket.id);
+    const oppIndex = queue.findIndex(item => 
+      item.socket.id !== socket.id && 
+      item.socket.connected && 
+      !(item.user.id === socket.user.id && item.user.name === socket.user.name)
+    );
     if (oppIndex !== -1) {
       opponentEntry = queue.splice(oppIndex, 1)[0];
     } else {
@@ -337,7 +323,10 @@ io.on('connection', (socket) => {
       for (const diff of Object.keys(queues)) {
         if (diff === difficulty) continue;
         const otherIndex = queues[diff].findIndex(item => 
-          item.socket.id !== socket.id && (Date.now() - item.joinedAt >= 6000)
+          item.socket.id !== socket.id && 
+          item.socket.connected && 
+          !(item.user.id === socket.user.id && item.user.name === socket.user.name) && 
+          (Date.now() - item.joinedAt >= 6000)
         );
         if (otherIndex !== -1) {
           opponentEntry = queues[diff].splice(otherIndex, 1)[0];
@@ -479,7 +468,8 @@ io.on('connection', (socket) => {
       }
       if (Array.isArray(game.playerData)) {
         const myP = game.playerData.find(p => 
-          (socket.user?.id && p.user?.id === socket.user.id)
+          (socket.user?.id && p.user?.id === socket.user.id) &&
+          (socket.user?.name && p.user?.name === socket.user.name)
         );
         if (myP) myP.socketId = socket.id;
       }
